@@ -8,6 +8,7 @@
 //	knxmon -port /dev/serial0 -write 1/1/2=0c1a  # 2 bytes, e.g. DPT 9 = 21.0 °C
 //	knxmon -port /dev/serial0 -read 1/1/1
 //	knxmon -port /dev/serial0 -info 1.1.3        # connect to a device and read its identity
+//	knxmon -port /dev/serial0 -address 1.1.250   # change the module's own address
 package main
 
 import (
@@ -31,6 +32,7 @@ func main() {
 	write := flag.String("write", "", "send a group write: GA=HEX, e.g. 1/1/1=1")
 	read := flag.String("read", "", "send a group read to GA, e.g. 1/1/1")
 	info := flag.String("info", "", "read the identity of the device at this individual address")
+	address := flag.String("address", "", "set the individual address of the module")
 	flag.Parse()
 
 	file, err := serial.Open(*port, *baud, serial.ParityEven)
@@ -48,6 +50,23 @@ func main() {
 		log.Printf("Module ready, device descriptor %x", descriptor)
 	} else {
 		log.Printf("Module ready, device descriptor unavailable: %v", err)
+	}
+
+	if *address != "" {
+		ia, err := cemi.NewIndividualAddrString(*address)
+		if err != nil {
+			log.Fatalf("Bad individual address %q: %v", *address, err)
+		}
+
+		if err := l.SetAddress(ia); err != nil {
+			log.Fatalf("Setting module address: %v", err)
+		}
+	}
+
+	if ia, err := l.ReadAddress(); err == nil {
+		log.Printf("Module address %s", ia)
+	} else {
+		log.Printf("Module address unavailable: %v", err)
 	}
 
 	if *write != "" {

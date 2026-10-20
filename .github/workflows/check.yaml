@@ -26,6 +26,6 @@ jobs:
       - uses: acifani/setup-tinygo@v2
         with:
           tinygo-version: 0.42.0
-      - run: sudo apt-get update && sudo apt-get install -y qemu-system-arm
+      - run: sudo apt-get update && sudo apt-get install -y qemu-system-arm qemu-system-misc
       - run: make tinygo-test
       - run: make tinygo-build

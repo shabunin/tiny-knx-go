@@ -35,8 +35,9 @@ type Link struct {
 }
 
 var (
-	_ link.Link      = (*Link)(nil)
-	_ link.Addresser = (*Link)(nil)
+	_ link.Link          = (*Link)(nil)
+	_ link.Addresser     = (*Link)(nil)
+	_ link.AddressSetter = (*Link)(nil)
 )
 
 // Attach adds a device with the given individual address to the bus.
@@ -52,7 +53,19 @@ func (bus *Bus) Attach(addr cemi.IndividualAddr) *Link {
 
 // Address returns the individual address of the link.
 func (l *Link) Address() cemi.IndividualAddr {
+	l.bus.mu.Lock()
+	defer l.bus.mu.Unlock()
+
 	return l.addr
+}
+
+// SetAddress changes the individual address of the link.
+func (l *Link) SetAddress(addr cemi.IndividualAddr) error {
+	l.bus.mu.Lock()
+	l.addr = addr
+	l.bus.mu.Unlock()
+
+	return nil
 }
 
 // Send delivers the frame to all other links. Frames to an individual address are confirmed only

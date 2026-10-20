@@ -2,7 +2,11 @@
 
 // Command pico-kberry is a minimal KNX switch actuator: a Raspberry Pi Pico with a kBerry module
 // on UART0 (GP0 = TX to kBerry RX, GP1 = RX from kBerry TX, plus 3V3 and GND). The on-board LED
-// follows group address 1/1/1 and its state is reported on 1/1/2. Telegrams are logged to USB.
+// follows group address 1/1/1 and its state is reported on 1/1/2. Events are logged to USB.
+//
+// A button from GP15 to GND switches programming mode, shown by an LED on GP14, so that ETS can
+// assign an individual address. The address is not saved: after a power cycle the device is
+// 15.15.255 again.
 //
 //	tinygo flash -target=pico ./examples/pico-kberry
 package main
@@ -11,17 +15,77 @@ import (
 	"machine"
 	"time"
 
+	"github.com/shabunin/tiny-knx-go/apdu"
 	"github.com/shabunin/tiny-knx-go/cemi"
+	"github.com/shabunin/tiny-knx-go/device"
+	"github.com/shabunin/tiny-knx-go/dpt"
 	"github.com/shabunin/tiny-knx-go/link/ft12"
 )
 
-var (
-	switchAddr = cemi.NewGroupAddr3(1, 1, 1)
-	statusAddr = cemi.NewGroupAddr3(1, 1, 2)
+const (
+	progButton = machine.GP15
+	progLED    = machine.GP14
 )
+
+var config = device.Config{
+	Objects: []device.ObjectConfig{
+		{
+			Name:      "switch",
+			DPT:       "1.001",
+			Flags:     device.FlagCommunicate | device.FlagWrite,
+			Addresses: []cemi.GroupAddr{cemi.NewGroupAddr3(1, 1, 1)},
+		},
+		{
+			Name:      "status",
+			DPT:       "1.001",
+			Flags:     device.FlagCommunicate | device.FlagRead | device.FlagTransmit,
+			Addresses: []cemi.GroupAddr{cemi.NewGroupAddr3(1, 1, 2)},
+		},
+	},
+}
 
 func main() {
 	machine.LED.Configure(machine.PinConfig{Mode: machine.PinOutput})
+	progLED.Configure(machine.PinConfig{Mode: machine.PinOutput})
+	progButton.Configure(machine.PinConfig{Mode: machine.PinInputPullup})
+
+	identity := device.Identity{
+		OrderNumber:      "PICO-KBERRY",
+		FirmwareRevision: 1,
+	}
+
+	// Manufacturer 0x00FA (KNX Association, used by community projects) and the board's unique ID.
+	identity.SerialNumber = apdu.SerialNumber{0x00, 0xFA}
+	id := machine.DeviceID()
+	copy(identity.SerialNumber[2:], id[len(id)-4:])
+
+	d, err := device.New(identity, config)
+	if err != nil {
+		panic(err)
+	}
+
+	status := d.Object("status")
+
+	d.Object("switch").OnChange(func(o *device.Object) {
+		var on dpt.DPT_1001
+		o.Get(&on)
+
+		machine.LED.Set(bool(on))
+		println("switch:", bool(on))
+
+		status.Set(on)
+	})
+
+	d.OnProgModeChange(func(on bool) {
+		progLED.Set(on)
+		println("programming mode:", on)
+	})
+
+	d.OnAddressChange(func(addr cemi.IndividualAddr) {
+		println("new address:", addr.String())
+	})
+
+	go watchButton(d)
 
 	uart := machine.UART0
 	uart.Configure(machine.UARTConfig{
@@ -31,55 +95,36 @@ func main() {
 	})
 	uart.SetFormat(8, 1, machine.ParityEven)
 
-	var l *ft12.Link
 	for {
-		var err error
-		if l, err = ft12.Open(uart, ft12.DefaultConfig); err == nil {
-			break
-		}
+		l, err := ft12.Open(uart, ft12.DefaultConfig)
+		if err != nil {
+			println("kBerry not responding:", err.Error())
+			time.Sleep(2 * time.Second)
 
-		println("kBerry not responding:", err.Error())
-		time.Sleep(2 * time.Second)
-	}
-
-	println("kBerry ready")
-
-	for ind := range l.Inbound() {
-		app, ok := ind.Data.(*cemi.AppData)
-		if !ok || !ind.Control2.IsGroupAddr() {
 			continue
 		}
 
-		dest := cemi.GroupAddr(ind.Destination)
+		println("kBerry ready, address", d.Address().String())
 
-		switch {
-		case app.Command == cemi.GroupValueWrite && dest == switchAddr:
-			on := len(app.Data) > 0 && app.Data[0]&1 == 1
-			machine.LED.Set(on)
-			println("switch:", on, "from", ind.Source.String())
-
-			report(l, statusAddr, cemi.GroupValueWrite, on)
-
-		case app.Command == cemi.GroupValueRead && (dest == switchAddr || dest == statusAddr):
-			report(l, dest, cemi.GroupValueResponse, machine.LED.Get())
-		}
+		err = d.Run(l)
+		println("device stopped:", err.Error())
+		l.Close()
+		time.Sleep(2 * time.Second)
 	}
 }
 
-// report sends the LED state to a group address.
-func report(l *ft12.Link, dest cemi.GroupAddr, command cemi.APCI, on bool) {
-	var value byte
-	if on {
-		value = 1
-	}
+// watchButton toggles programming mode when the button is pressed.
+func watchButton(d *device.Device) {
+	wasPressed := false
 
-	err := l.Send(&cemi.LDataReq{LData: cemi.LData{
-		Control1:    cemi.Control1Request(cemi.PrioLow),
-		Control2:    cemi.Control2GroupAddr | cemi.Control2Hops(6),
-		Destination: uint16(dest),
-		Data:        &cemi.AppData{Command: command, Data: []byte{value}},
-	}})
-	if err != nil {
-		println("status not sent:", err.Error())
+	for {
+		pressed := !progButton.Get()
+		if pressed && !wasPressed {
+			d.SetProgMode(!d.ProgMode())
+		}
+
+		wasPressed = pressed
+
+		time.Sleep(20 * time.Millisecond) // debounce
 	}
 }

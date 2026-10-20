@@ -1,4 +1,6 @@
 PACKAGES := ./cemi ./dpt ./apdu ./internal/util ./link/ft12 ./link/mock ./transport
+# Packages whose tests do not fit the 256 KB flash of cortex-m-qemu run on riscv-qemu instead.
+LARGE    := ./device
 BOARDS   := pico esp32-coreboard-v2 xiao-esp32c3
 BUILD    := build
 
@@ -11,9 +13,11 @@ test:
 	go vet ./...
 	go test -race ./...
 
-# Run the unit tests on an emulated ARM Cortex-M (needs qemu-system-arm).
+# Run the unit tests on an emulated ARM Cortex-M and RISC-V (needs qemu-system-arm and
+# qemu-system-riscv32).
 tinygo-test:
 	for p in $(PACKAGES); do tinygo test -target=cortex-m-qemu $$p || exit 1; done
+	for p in $(LARGE); do tinygo test -target=riscv-qemu $$p || exit 1; done
 	tinygo run -target=cortex-m-qemu ./examples/smoke
 
 # Compile firmware for real boards to make sure the core stays TinyGo compatible.

@@ -90,11 +90,13 @@ type fakeModule struct {
 	drop     int     // number of upcoming data frames to ignore
 	fcb      bool
 	commMode byte
+	address  cemi.IndividualAddr
+	writes   int // property writes other than the communication mode
 	changed  chan struct{}
 }
 
 func newFakeModule(port *pipePort) *fakeModule {
-	m := &fakeModule{port: port, commMode: 0xF0, fcb: true, changed: make(chan struct{}, 100)}
+	m := &fakeModule{port: port, commMode: 0xF0, address: moduleAddr, fcb: true, changed: make(chan struct{}, 100)}
 	go m.serve()
 
 	return m
@@ -171,32 +173,49 @@ func (m *fakeModule) respond(payload []byte) {
 		con := &cemi.MPropWriteCon{MProp: req.MProp}
 		con.Data = nil
 
-		if req.ObjectType == cemi.ObjectTypeCEMIServer && req.PropertyID == cemi.PIDCommMode {
-			m.mu.Lock()
+		m.mu.Lock()
+		switch {
+		case req.ObjectType == cemi.ObjectTypeCEMIServer && req.PropertyID == cemi.PIDCommMode:
 			m.commMode = req.Data[0]
-			m.mu.Unlock()
-		} else {
+		case req.ObjectType == cemi.ObjectTypeDevice && req.PropertyID == cemi.PIDSubnetAddr:
+			m.address = cemi.IndividualAddr(req.Data[0])<<8 | m.address&0xff
+			m.writes++
+		case req.ObjectType == cemi.ObjectTypeDevice && req.PropertyID == cemi.PIDDeviceAddr:
+			m.address = m.address&0xff00 | cemi.IndividualAddr(req.Data[0])
+			m.writes++
+		default:
 			con.Count = 0
 			con.Data = []byte{0x07}
 		}
+		m.mu.Unlock()
 
 		m.send(con)
 
 	case *cemi.MPropReadReq:
 		con := &cemi.MPropReadCon{MProp: req.MProp}
 
-		if req.ObjectType == cemi.ObjectTypeDevice && req.PropertyID == cemi.PIDDeviceDescriptor {
+		m.mu.Lock()
+		switch {
+		case req.ObjectType == cemi.ObjectTypeDevice && req.PropertyID == cemi.PIDDeviceDescriptor:
 			con.Data = []byte{0x07, 0xb0}
-		} else {
+		case req.ObjectType == cemi.ObjectTypeDevice && req.PropertyID == cemi.PIDSubnetAddr:
+			con.Data = []byte{byte(m.address >> 8)}
+		case req.ObjectType == cemi.ObjectTypeDevice && req.PropertyID == cemi.PIDDeviceAddr:
+			con.Data = []byte{byte(m.address)}
+		default:
 			con.Count = 0
 			con.Data = []byte{0x07}
 		}
+		m.mu.Unlock()
 
 		m.send(con)
 
 	case *cemi.LDataReq:
 		con := &cemi.LDataCon{LData: req.LData}
-		con.Source = moduleAddr
+
+		m.mu.Lock()
+		con.Source = m.address
+		m.mu.Unlock()
 
 		if cemi.IndividualAddr(req.Destination) == unreachableAddr {
 			con.Control1 |= cemi.Control1HasError
@@ -465,6 +484,44 @@ func TestReadProperty(t *testing.T) {
 
 	if _, err := l.ReadProperty(cemi.ObjectTypeDevice, 1, 200, 1, 1); !errors.Is(err, ErrPropertyFailed) {
 		t.Errorf("Reading unknown property: got %v, expected %v", err, ErrPropertyFailed)
+	}
+}
+
+func TestSetAddress(t *testing.T) {
+	l, module := openTestLink(t)
+	newAddr := cemi.NewIndividualAddr3(1, 2, 3)
+
+	if err := l.SetAddress(newAddr); err != nil {
+		t.Fatalf("SetAddress failed: %v", err)
+	}
+
+	if l.Address() != newAddr {
+		t.Errorf("Address %v, expected %v", l.Address(), newAddr)
+	}
+
+	module.mu.Lock()
+	if module.address != newAddr || module.writes != 2 {
+		t.Errorf("Module has address %v after %d writes", module.address, module.writes)
+	}
+	module.mu.Unlock()
+
+	// The same address again is not written.
+	if err := l.SetAddress(newAddr); err != nil {
+		t.Fatalf("SetAddress failed: %v", err)
+	}
+
+	module.mu.Lock()
+	if module.writes != 2 {
+		t.Errorf("Unchanged address written again (%d writes)", module.writes)
+	}
+	module.mu.Unlock()
+
+	if err := l.Send(groupWrite(0x0901, 1)); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	if l.Address() != newAddr {
+		t.Errorf("Address %v after sending, expected %v", l.Address(), newAddr)
 	}
 }
 

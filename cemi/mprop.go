@@ -12,6 +12,8 @@ const (
 	ObjectTypeDevice     uint16 = 0
 	ObjectTypeCEMIServer uint16 = 8
 
+	PIDSubnetAddr       uint8 = 57 // in the device object: high byte of the individual address
+	PIDDeviceAddr       uint8 = 58 // in the device object: low byte of the individual address
 	PIDDeviceDescriptor uint8 = 83 // in the device object
 	PIDCommMode         uint8 = 52 // in the cEMI server object
 

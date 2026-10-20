@@ -90,3 +90,27 @@ func Test_GroupAddresses(t *testing.T) {
 		}
 	}
 }
+
+func TestAddressText(t *testing.T) {
+	var ia IndividualAddr
+	if err := ia.UnmarshalText([]byte("1.1.50")); err != nil || ia != NewIndividualAddr3(1, 1, 50) {
+		t.Errorf("UnmarshalText(1.1.50) = %v, %v", ia, err)
+	}
+
+	if text, _ := ia.MarshalText(); string(text) != "1.1.50" {
+		t.Errorf("MarshalText = %s", text)
+	}
+
+	var ga GroupAddr
+	if err := ga.UnmarshalText([]byte("1/2/3")); err != nil || ga != NewGroupAddr3(1, 2, 3) {
+		t.Errorf("UnmarshalText(1/2/3) = %v, %v", ga, err)
+	}
+
+	if text, _ := ga.MarshalText(); string(text) != "1/2/3" {
+		t.Errorf("MarshalText = %s", text)
+	}
+
+	if err := ga.UnmarshalText([]byte("1.2.3")); err == nil {
+		t.Error("UnmarshalText accepted an individual address as group address")
+	}
+}

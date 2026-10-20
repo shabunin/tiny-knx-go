@@ -42,3 +42,9 @@ type Link interface {
 type Addresser interface {
 	Address() cemi.IndividualAddr
 }
+
+// An AddressSetter is a Link whose individual address can be changed, e.g. when ETS assigns a new
+// address to the device that uses the link.
+type AddressSetter interface {
+	SetAddress(addr cemi.IndividualAddr) error
+}

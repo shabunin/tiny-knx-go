@@ -65,8 +65,9 @@ type Link struct {
 }
 
 var (
-	_ link.Link      = (*Link)(nil)
-	_ link.Addresser = (*Link)(nil)
+	_ link.Link          = (*Link)(nil)
+	_ link.Addresser     = (*Link)(nil)
+	_ link.AddressSetter = (*Link)(nil)
 )
 
 // Open resets the module behind port and switches it to data link layer mode.
@@ -225,6 +226,51 @@ func (l *Link) request(
 // frame and is zero until then.
 func (l *Link) Address() cemi.IndividualAddr {
 	return cemi.IndividualAddr(l.address.Load())
+}
+
+// SetAddress changes the individual address of the module. The module only acknowledges and
+// forwards point-to-point frames for its own address, so a device that uses the link must have the
+// same address. The address is written only if it differs, to spare the module's memory.
+func (l *Link) SetAddress(addr cemi.IndividualAddr) error {
+	current, err := l.ReadAddress()
+	if err != nil {
+		return err
+	}
+
+	if current != addr {
+		err := l.WriteProperty(cemi.ObjectTypeDevice, 1, cemi.PIDSubnetAddr, 1, []byte{byte(addr >> 8)})
+		if err != nil {
+			return err
+		}
+
+		err = l.WriteProperty(cemi.ObjectTypeDevice, 1, cemi.PIDDeviceAddr, 1, []byte{byte(addr)})
+		if err != nil {
+			return err
+		}
+	}
+
+	l.address.Store(uint32(addr))
+
+	return nil
+}
+
+// ReadAddress reads the individual address from the module's device object.
+func (l *Link) ReadAddress() (cemi.IndividualAddr, error) {
+	subnet, err := l.ReadProperty(cemi.ObjectTypeDevice, 1, cemi.PIDSubnetAddr, 1, 1)
+	if err != nil {
+		return 0, err
+	}
+
+	device, err := l.ReadProperty(cemi.ObjectTypeDevice, 1, cemi.PIDDeviceAddr, 1, 1)
+	if err != nil {
+		return 0, err
+	}
+
+	if len(subnet) != 1 || len(device) != 1 {
+		return 0, ErrPropertyFailed
+	}
+
+	return cemi.IndividualAddr(subnet[0])<<8 | cemi.IndividualAddr(device[0]), nil
 }
 
 // Inbound returns the frames received from the bus.

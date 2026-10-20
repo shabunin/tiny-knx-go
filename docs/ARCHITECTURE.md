@@ -24,9 +24,9 @@ Arduino, with the bus connection and the configuration source kept pluggable.
 ```
  your device (switch actuator, sensor, gateway…)
  ─────────────────────────────────────────────────────────
- device     group objects, flags, prog mode,            planned
+ device     group objects, flags, prog mode,            done
             answers DeviceDescriptorRead / IA programming
- config     device.Config ← code | JSON | web UI | ets    planned
+ config     device.Config ← code | JSON | web UI | ets    done (ets planned)
  transport  T_Connect/T_Data/T_ACK state machine, Client done
  apdu       application services incl. 10-bit APCI       done
  dpt        datapoint encoding                            done
@@ -57,7 +57,8 @@ a file on Linux). Devices that are configured another way never link it.
    Authorize/Key, PropertyValue*, PropertyDescription*); others decode as `apdu.Unknown`.
 4. ✅ `transport`: the KNX 03_03_04 connection state machine (one `Conn` for both the device and the
    client side), `transport.Client` for tools, `link/mock`, `knxmon -info`.
-5. `device`: group objects with C/R/W/T/U flags, `device.Config`, prog mode, management responses.
+5. ✅ `device`: group objects with C/R/W/T/U/I flags, `device.Config` (JSON), prog mode, IA
+   programming (also by serial number), device object properties, DeviceDescriptorRead, Restart.
    First real device: switch actuator on Pico + kBerry.
 6. `link/knxip` (routing for Linux/Pi, tunnelling client) and `link/tpuart`.
 7. Client tools: line scanner, property reader.
@@ -72,4 +73,8 @@ a file on Linux). Devices that are configured another way never link it.
   polls it every millisecond.
 - Frames we originate use control field 0xBC (low priority), the value ETS uses
   (`cemi.Control1Request`).
+- A BAOS module occupies one individual address and only acknowledges and forwards point-to-point
+  frames for it. A device on a kBerry therefore uses the module's address: `device.Run` sets it
+  through `ft12.Link.SetAddress`, which writes `PID_SUBNET_ADDR` (57) and `PID_DEVICE_ADDR` (58) of
+  the device object, and only when the address differs. Not yet verified on real hardware.
 - Linux pseudo-terminals ignore parity, so `socat` pty pairs work for testing without hardware.

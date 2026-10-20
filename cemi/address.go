@@ -156,3 +156,33 @@ func NewGroupAddrString(addr string) (GroupAddr, error) {
 func (addr GroupAddr) String() string {
 	return fmt.Sprintf("%d/%d/%d", uint8(addr>>11)&0x1F, uint8(addr>>8)&0x7, uint8(addr))
 }
+
+// MarshalText implements encoding.TextMarshaler, e.g. for JSON configuration files.
+func (addr IndividualAddr) MarshalText() ([]byte, error) {
+	return []byte(addr.String()), nil
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (addr *IndividualAddr) UnmarshalText(text []byte) error {
+	parsed, err := NewIndividualAddrString(string(text))
+	if err == nil {
+		*addr = parsed
+	}
+
+	return err
+}
+
+// MarshalText implements encoding.TextMarshaler, e.g. for JSON configuration files.
+func (addr GroupAddr) MarshalText() ([]byte, error) {
+	return []byte(addr.String()), nil
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (addr *GroupAddr) UnmarshalText(text []byte) error {
+	parsed, err := NewGroupAddrString(string(text))
+	if err == nil {
+		*addr = parsed
+	}
+
+	return err
+}
