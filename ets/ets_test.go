@@ -99,8 +99,15 @@ func TestLoadStateMachine(t *testing.T) {
 		}
 	}
 
-	if len(m.segments) != 0 || tbl.reference() != 0 {
-		t.Errorf("Unloading left %d segments", len(m.segments))
+	// Unloading keeps the segment for a partial download, which writes to it without allocating.
+	tbl.loadEvent(&m, lsc(eventUnload))
+
+	if len(m.segments) != 1 || tbl.reference() != 0 {
+		t.Errorf("Unloaded: %d segments, reference %#x", len(m.segments), tbl.reference())
+	}
+
+	if tbl.loadEvent(&m, lsc(eventStartLoading)); tbl.reference() != memoryStart {
+		t.Errorf("Loading again: reference %#x", tbl.reference())
 	}
 
 	// A group object table needs a segment.

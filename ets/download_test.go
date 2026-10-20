@@ -548,6 +548,7 @@ func TestPartialDownload(t *testing.T) {
 	tl.load(4, params, false)
 
 	// While the application is unloaded, the device is not configured and objects are silent.
+	ref := tl.readProperty(4, pidTableReference)
 	tl.loadEvent(4, lsc(eventUnload), stateUnloaded)
 
 	eventually(t, "unconfigured", func() bool { return !e.Configured() && d.Objects()[0].Flags() == 0 })
@@ -556,8 +557,17 @@ func TestPartialDownload(t *testing.T) {
 		t.Errorf("Parameter of an unloaded application: %d", e.Param(0))
 	}
 
+	// Like ETS, write the changed parameters at the old reference, without allocating.
 	newParams := []byte{9, 9, 9, 9, 0, 0, 0, 1}
-	tl.load(4, newParams, false)
+
+	tl.loadEvent(4, lsc(eventStartLoading), stateLoading)
+
+	if again := tl.readProperty(4, pidTableReference); !bytes.Equal(again, ref) {
+		t.Fatalf("Reference of the application % x after unloading, % x before", again, ref)
+	}
+
+	tl.writeMemory(uint16(ref[2])<<8|uint16(ref[3]), newParams, false)
+	tl.loadEvent(4, lsc(eventLoadCompleted), stateLoaded)
 
 	eventually(t, "configured", func() bool { return e.Configured() && d.Objects()[0].Flags() != 0 })
 

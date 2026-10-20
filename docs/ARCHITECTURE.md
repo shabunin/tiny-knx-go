@@ -64,7 +64,10 @@ table to learn its format (PDT_GENERIC_04: TSAP and ASAP of 16 bits) and gives u
 it ignores HARDWARE_TYPE (zeros); it switches on verify mode through DEVICE_CONTROL and writes at
 most 12 bytes per MemoryWrite (MAX_APDU_LENGTH 15); it unloads objects 5 to 1 (and accepts that
 there is no object 5), starts loading and allocates the tables in the order 4, 3, 1, 2, writes
-them, and completes them in the order 4, 3, 2, 1.
+them, and completes them in the order 4, 3, 2, 1. A partial download unloads only the application
+program, starts loading it, reads PID_TABLE_REFERENCE and writes the parameters there without
+allocating the segment again, so unloading keeps the segment (the thelsing stack frees it and
+fails here).
 Not yet checked: objects with several addresses (whether the sending address comes first in the
 association table). Not done: master reset does not clear the tables, the priority in the group
 object table is ignored.

@@ -101,16 +101,13 @@ func (t *table) fail(code uint8) {
 	t.errorCode = code
 }
 
-// unload frees the segment. Unlike the thelsing stack, which frees it only when unloading a
-// loaded table, it is freed in every state, so an aborted download leaks nothing.
-func (t *table) unload(m *memory) {
+// unload marks the table unloaded but keeps its segment, unlike the thelsing stack: in a partial
+// download ETS unloads the table, starts loading, writes the changes at the old
+// PID_TABLE_REFERENCE and completes, without allocating the segment again. A full download
+// allocates a new segment, which replaces the old one.
+func (t *table) unload(*memory) {
 	t.state = stateUnloaded
 	t.errorCode = errNoFault
-
-	if t.segment != nil {
-		m.free(t.segment)
-		t.segment = nil
-	}
 }
 
 // additionalLoadControls handles a load control that ETS sends while loading. The only one a
