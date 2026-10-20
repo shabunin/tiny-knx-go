@@ -68,8 +68,9 @@ them, and completes them in the order 4, 3, 2, 1. A partial download unloads onl
 program, starts loading it, reads PID_TABLE_REFERENCE and writes the parameters there without
 allocating the segment again, so unloading keeps the segment (the thelsing stack frees it and
 fails here).
-Not yet checked: objects with several addresses (whether the sending address comes first in the
-association table). Not done: master reset does not clear the tables, the priority in the group
+With several addresses per object, ETS writes one association per object first (its sending
+address) and the other links after them, e.g. (1,1) (2,2) (3,3) (4,4) (5,2) (2,3), so the first
+address found for an object is its sending address. Not done: master reset does not clear the tables, the priority in the group
 object table is ignored.
 
 ## Roadmap
