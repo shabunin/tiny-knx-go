@@ -1,0 +1,57 @@
+# tiny-knx-go
+
+KNX protocol packages for Go and [TinyGo](https://tinygo.org): build and parse cEMI frames and
+datapoint values with no dependencies, on a server or on a microcontroller.
+
+Derived from [vapourismo/knx-go](https://github.com/vapourismo/knx-go) (MIT). The design and
+roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Packages
+
+ Package | Description
+---------|------------------------------------------------------------------
+ `cemi`  | cEMI frames: L_Data, L_Raw, L_Busmon, addresses, control fields, TPDU/APCI
+ `dpt`   | Datapoint types (DPT 1, 5–14, 16–18, 20, 28, 232, 242, 251)
+ `link`  | Interface between the protocol stack and a bus connection
+ `link/ft12` | BAOS modules (kBerry) over FT1.2 serial, in cEMI data link layer mode
+ `serial` | Opens serial ports on Linux with the standard library only
+ `cmd/knxmon` | Bus monitor for a kBerry on a Raspberry Pi: prints telegrams, sends reads/writes
+ `examples/pico-kberry` | Minimal switch actuator: Pico + kBerry, LED on 1/1/1, status on 1/1/2
+
+The core packages use no `reflect`, no `net` and no third-party modules.
+
+## Differences from knx-go
+
+- `dpt.Produce` uses constructor functions instead of `reflect`.
+- The ISO 8859-1 string helpers (and with them `golang.org/x/text`) are gone; nothing in `cemi` or
+  `dpt` used them.
+- Fixed: a TPDU shorter than its length byte was accepted and zero-padded, while a frame with
+  bytes after the TPDU was rejected.
+- Fixed: `ControlField2.Hops()` read the wrong bits.
+- Fixed: `LRawInd.MessageCode()` returned the L_Raw.con code.
+- Added: cEMI management messages (M_PropRead, M_PropWrite, M_PropInfo, M_Reset).
+
+## Trying it with a kBerry
+
+On a Raspberry Pi with the kBerry on the GPIO header (serial console disabled, UART enabled):
+
+```sh
+GOOS=linux GOARCH=arm64 go build ./cmd/knxmon   # GOARCH=arm GOARM=6 for 32-bit Raspberry Pi OS
+./knxmon -port /dev/serial0                     # watch the bus
+./knxmon -port /dev/serial0 -write 1/1/1=1      # switch something on
+```
+
+On a Pico wired to the kBerry (GP0 → kBerry RX, GP1 ← kBerry TX, 3V3, GND):
+
+```sh
+tinygo flash -target=pico ./examples/pico-kberry
+```
+
+## Development
+
+```sh
+make test          # go vet + go test on the host
+make tinygo-test   # unit tests on an emulated Cortex-M (needs tinygo and qemu-system-arm)
+make tinygo-build  # firmware for pico, esp32-coreboard-v2 and xiao-esp32c3
+make check         # all of the above
+```

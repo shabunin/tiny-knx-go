@@ -1,0 +1,31 @@
+name: Check
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: make test
+  tinygo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"  # must be a Go release supported by the TinyGo version below
+      - uses: acifani/setup-tinygo@v2
+        with:
+          tinygo-version: 0.42.0
+      - run: sudo apt-get update && sudo apt-get install -y qemu-system-arm
+      - run: make tinygo-test
+      - run: make tinygo-build
