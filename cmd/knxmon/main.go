@@ -7,6 +7,7 @@
 //	knxmon -port /dev/serial0 -write 1/1/1=1     # switch on (DPT 1)
 //	knxmon -port /dev/serial0 -write 1/1/2=0c1a  # 2 bytes, e.g. DPT 9 = 21.0 °C
 //	knxmon -port /dev/serial0 -read 1/1/1
+//	knxmon -port /dev/serial0 -info 1.1.3        # connect to a device and read its identity
 package main
 
 import (
@@ -21,6 +22,7 @@ import (
 	"github.com/shabunin/tiny-knx-go/cemi"
 	"github.com/shabunin/tiny-knx-go/link/ft12"
 	"github.com/shabunin/tiny-knx-go/serial"
+	"github.com/shabunin/tiny-knx-go/transport"
 )
 
 func main() {
@@ -28,6 +30,7 @@ func main() {
 	baud := flag.Int("baud", 19200, "baud rate")
 	write := flag.String("write", "", "send a group write: GA=HEX, e.g. 1/1/1=1")
 	read := flag.String("read", "", "send a group read to GA, e.g. 1/1/1")
+	info := flag.String("info", "", "read the identity of the device at this individual address")
 	flag.Parse()
 
 	file, err := serial.Open(*port, *baud, serial.ParityEven)
@@ -74,6 +77,11 @@ func main() {
 		send(l, *read, cemi.GroupValueRead, nil)
 	}
 
+	if *info != "" {
+		printInfo(l, *info)
+		return
+	}
+
 	for ind := range l.Inbound() {
 		fmt.Println(time.Now().Format("15:04:05.000"), describe(&ind.LData))
 	}
@@ -92,7 +100,7 @@ func send(l *ft12.Link, addr string, command cemi.APCI, data []byte) {
 	}
 
 	req := &cemi.LDataReq{LData: cemi.LData{
-		Control1:    cemi.Control1StdFrame | cemi.Control1Prio(cemi.PrioLow),
+		Control1:    cemi.Control1Request(cemi.PrioLow),
 		Control2:    cemi.Control2GroupAddr | cemi.Control2Hops(6),
 		Destination: uint16(ga),
 		Data:        &cemi.AppData{Command: command, Data: data},
@@ -103,6 +111,52 @@ func send(l *ft12.Link, addr string, command cemi.APCI, data []byte) {
 	}
 
 	log.Printf("Sent %s to %s", apciName(command), ga)
+}
+
+// printInfo connects to a device and prints what identifies it.
+func printInfo(l *ft12.Link, addr string) {
+	ia, err := cemi.NewIndividualAddrString(addr)
+	if err != nil {
+		log.Fatalf("Bad individual address %q: %v", addr, err)
+	}
+
+	client := transport.NewClient(l, transport.DefaultConfig)
+	defer client.Close()
+
+	if err := client.Connect(ia); err != nil {
+		log.Fatalf("Connecting to %s: %v", ia, err)
+	}
+	defer client.Disconnect()
+
+	mask, err := client.DeviceDescriptor()
+	if err != nil {
+		log.Fatalf("Reading device descriptor of %s: %v", ia, err)
+	}
+
+	fmt.Printf("Device %s\n", ia)
+	fmt.Printf("  mask version    %04x\n", mask)
+
+	// Properties of the device object (object index 0).
+	properties := []struct {
+		name string
+		id   uint8
+		text bool
+	}{
+		{"serial number", 11, false},
+		{"manufacturer", 12, false},
+		{"order number", 15, true},
+		{"hardware type", 78, false},
+	}
+
+	for _, p := range properties {
+		if value, err := client.ReadProperty(0, p.id, 1, 1); err == nil && p.text {
+			fmt.Printf("  %-15s %q\n", p.name, strings.TrimRight(string(value), "\x00 "))
+		} else if err == nil {
+			fmt.Printf("  %-15s % x\n", p.name, value)
+		} else {
+			fmt.Printf("  %-15s (%v)\n", p.name, err)
+		}
+	}
 }
 
 func describe(ldata *cemi.LData) string {

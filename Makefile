@@ -1,4 +1,4 @@
-PACKAGES := ./cemi ./dpt ./internal/util ./link/ft12
+PACKAGES := ./cemi ./dpt ./apdu ./internal/util ./link/ft12 ./link/mock ./transport
 BOARDS   := pico esp32-coreboard-v2 xiao-esp32c3
 BUILD    := build
 

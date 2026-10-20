@@ -22,7 +22,7 @@ func toHex(data []byte) string {
 func main() {
 	// Write 20.5 °C (DPT 9.001) to group 1/2/3.
 	req := &cemi.LDataReq{LData: cemi.LData{
-		Control1:    cemi.Control1StdFrame | cemi.Control1Prio(cemi.PrioLow),
+		Control1:    cemi.Control1Request(cemi.PrioLow),
 		Control2:    cemi.Control2GroupAddr | cemi.Control2Hops(6),
 		Destination: uint16(cemi.NewGroupAddr3(1, 2, 3)),
 		Data: &cemi.AppData{

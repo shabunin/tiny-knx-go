@@ -27,8 +27,8 @@ Arduino, with the bus connection and the configuration source kept pluggable.
  device     group objects, flags, prog mode,            planned
             answers DeviceDescriptorRead / IA programming
  config     device.Config ← code | JSON | web UI | ets    planned
- transport  T_Connect/T_Data/T_ACK state machines        planned
- apdu       all application services incl. 10-bit APCI   planned
+ transport  T_Connect/T_Data/T_ACK state machine, Client done
+ apdu       application services incl. 10-bit APCI       done
  dpt        datapoint encoding                            done
  cemi       cEMI frames, M_Prop*, M_Reset                 done
  ─────────────────────────────────────────────────────────
@@ -36,7 +36,7 @@ Arduino, with the bus connection and the configuration source kept pluggable.
    ft12       BAOS / kBerry over FT1.2 (cEMI LL mode)      done
    tpuart     NCN5120 / TP-UART2                           planned
    knxip      KNXnet/IP routing + tunnelling client        planned
-   mock       in-memory bus for tests                      planned
+   mock       in-memory bus for tests                      done
  ─────────────────────────────────────────────────────────
  port       io.ReadWriter: machine.UART (TinyGo), serial.Open (Linux), net.Conn
 ```
@@ -52,9 +52,11 @@ a file on Linux). Devices that are configured another way never link it.
 
 1. ✅ Port `cemi` and `dpt` from knx-go; TinyGo CI (host tests, QEMU tests, board builds).
 2. ✅ `link` interface, FT1.2 / BAOS driver, Linux serial ports, `knxmon`, Pico + kBerry example.
-3. `apdu`: typed encode/decode for every application service (PropertyValue*, Memory*,
-   DeviceDescriptor*, IndividualAddress*, Restart, Authorize…).
-4. `transport`: connection-oriented state machines, device side and client side; `link/mock`.
+3. ✅ `apdu`: typed encode/decode for the application services that devices and tools need
+   (GroupValue*, IndividualAddress*, SerialNumber*, ADC*, Memory*, DeviceDescriptor*, Restart,
+   Authorize/Key, PropertyValue*, PropertyDescription*); others decode as `apdu.Unknown`.
+4. ✅ `transport`: the KNX 03_03_04 connection state machine (one `Conn` for both the device and the
+   client side), `transport.Client` for tools, `link/mock`, `knxmon -info`.
 5. `device`: group objects with C/R/W/T/U flags, `device.Config`, prog mode, management responses.
    First real device: switch actuator on Pico + kBerry.
 6. `link/knxip` (routing for Linux/Pi, tunnelling client) and `link/tpuart`.
@@ -68,4 +70,6 @@ a file on Linux). Devices that are configured another way never link it.
   server object, and does it again after the module resets.
 - TinyGo's `machine.UART.Read` returns immediately when no data is buffered; the FT1.2 driver
   polls it every millisecond.
+- Frames we originate use control field 0xBC (low priority), the value ETS uses
+  (`cemi.Control1Request`).
 - Linux pseudo-terminals ignore parity, so `socat` pty pairs work for testing without hardware.

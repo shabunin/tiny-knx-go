@@ -36,3 +36,9 @@ type Link interface {
 	// Close terminates the link.
 	Close() error
 }
+
+// An Addresser is a Link that knows the individual address it sends with. The address may only
+// become known after the first frame was sent (zero until then).
+type Addresser interface {
+	Address() cemi.IndividualAddr
+}

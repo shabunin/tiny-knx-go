@@ -48,6 +48,13 @@ func Control1Prio(prio Priority) ControlField1 {
 	return ControlField1(prio&3) << 2
 }
 
+// Control1Request returns the control field for frames that we send: a standard frame with the
+// given priority and the repeat and broadcast bits set the way ETS sets them (0xBC for low
+// priority).
+func Control1Request(prio Priority) ControlField1 {
+	return Control1StdFrame | Control1NoRepeat | Control1NoSysBroadcast | Control1Prio(prio)
+}
+
 // ControlField2 contains various control information.
 type ControlField2 uint8
 

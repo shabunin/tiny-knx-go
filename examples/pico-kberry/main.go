@@ -74,7 +74,7 @@ func report(l *ft12.Link, dest cemi.GroupAddr, command cemi.APCI, on bool) {
 	}
 
 	err := l.Send(&cemi.LDataReq{LData: cemi.LData{
-		Control1:    cemi.Control1StdFrame | cemi.Control1Prio(cemi.PrioLow),
+		Control1:    cemi.Control1Request(cemi.PrioLow),
 		Control2:    cemi.Control2GroupAddr | cemi.Control2Hops(6),
 		Destination: uint16(dest),
 		Data:        &cemi.AppData{Command: command, Data: []byte{value}},

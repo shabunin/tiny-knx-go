@@ -326,8 +326,16 @@ func TestOpenSwitchesToLinkLayer(t *testing.T) {
 func TestSend(t *testing.T) {
 	l, module := openTestLink(t)
 
+	if l.Address() != 0 {
+		t.Errorf("Address %v before the first confirmation", l.Address())
+	}
+
 	if err := l.Send(groupWrite(uint16(cemi.NewGroupAddr3(1, 2, 3)), 1)); err != nil {
 		t.Fatalf("Send failed: %v", err)
+	}
+
+	if l.Address() != moduleAddr {
+		t.Errorf("Address %v, expected %v", l.Address(), moduleAddr)
 	}
 
 	err := l.Send(&cemi.LDataReq{LData: cemi.LData{

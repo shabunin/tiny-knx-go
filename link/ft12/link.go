@@ -61,9 +61,13 @@ type Link struct {
 
 	inbound chan *cemi.LDataInd
 	dropped atomic.Uint32
+	address atomic.Uint32 // learned from L_Data.con
 }
 
-var _ link.Link = (*Link)(nil)
+var (
+	_ link.Link      = (*Link)(nil)
+	_ link.Addresser = (*Link)(nil)
+)
 
 // Open resets the module behind port and switches it to data link layer mode.
 func Open(port io.ReadWriter, config Config) (*Link, error) {
@@ -217,6 +221,12 @@ func (l *Link) request(
 	}
 }
 
+// Address returns the individual address of the module. It is learned from the first confirmed
+// frame and is zero until then.
+func (l *Link) Address() cemi.IndividualAddr {
+	return cemi.IndividualAddr(l.address.Load())
+}
+
 // Inbound returns the frames received from the bus.
 func (l *Link) Inbound() <-chan *cemi.LDataInd {
 	return l.inbound
@@ -275,6 +285,11 @@ func (l *Link) dispatch(payload []byte) {
 		}
 
 	case *cemi.LDataCon:
+		// The module fills in its own address as the source of our frames.
+		if msg.Source != 0 {
+			l.address.Store(uint32(msg.Source))
+		}
+
 		offer(l.cons, msg)
 
 	case *cemi.MPropReadCon, *cemi.MPropWriteCon:

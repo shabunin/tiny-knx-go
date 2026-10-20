@@ -12,10 +12,13 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 ---------|------------------------------------------------------------------
  `cemi`  | cEMI frames: L_Data, L_Raw, L_Busmon, addresses, control fields, TPDU/APCI
  `dpt`   | Datapoint types (DPT 1, 5–14, 16–18, 20, 28, 232, 242, 251)
+ `apdu`  | Application layer services (group values, properties, memory, device descriptor…)
+ `transport` | Transport connections: state machine without I/O, and a Client for tools
  `link`  | Interface between the protocol stack and a bus connection
+ `link/mock` | In-memory bus for tests
  `link/ft12` | BAOS modules (kBerry) over FT1.2 serial, in cEMI data link layer mode
  `serial` | Opens serial ports on Linux with the standard library only
- `cmd/knxmon` | Bus monitor for a kBerry on a Raspberry Pi: prints telegrams, sends reads/writes
+ `cmd/knxmon` | Bus monitor for a kBerry on a Raspberry Pi: prints telegrams, sends reads/writes, reads device identity
  `examples/pico-kberry` | Minimal switch actuator: Pico + kBerry, LED on 1/1/1, status on 1/1/2
 
 The core packages use no `reflect`, no `net` and no third-party modules.
@@ -39,6 +42,7 @@ On a Raspberry Pi with the kBerry on the GPIO header (serial console disabled, U
 GOOS=linux GOARCH=arm64 go build ./cmd/knxmon   # GOARCH=arm GOARM=6 for 32-bit Raspberry Pi OS
 ./knxmon -port /dev/serial0                     # watch the bus
 ./knxmon -port /dev/serial0 -write 1/1/1=1      # switch something on
+./knxmon -port /dev/serial0 -info 1.1.3         # connect to a device, read mask, serial, order no.
 ```
 
 On a Pico wired to the kBerry (GP0 → kBerry RX, GP1 ← kBerry TX, 3V3, GND):

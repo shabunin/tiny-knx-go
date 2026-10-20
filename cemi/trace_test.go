@@ -173,3 +173,14 @@ func TestUnpackAppDataLength(t *testing.T) {
 		t.Errorf("Unpack consumed %d bytes, expected %d", n, len(frame))
 	}
 }
+
+func TestControl1Request(t *testing.T) {
+	// ETS sends 0xBC (see the trace above); system priority gives 0xB0.
+	if got := Control1Request(PrioLow); got != 0xBC {
+		t.Errorf("Control1Request(PrioLow) = %#x, expected 0xbc", got)
+	}
+
+	if got := Control1Request(PrioSystem); got != 0xB0 {
+		t.Errorf("Control1Request(PrioSystem) = %#x, expected 0xb0", got)
+	}
+}
