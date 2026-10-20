@@ -29,12 +29,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/shabunin/tiny-knx-go/apdu"
 	"github.com/shabunin/tiny-knx-go/cemi"
 	"github.com/shabunin/tiny-knx-go/device"
 	"github.com/shabunin/tiny-knx-go/ets"
 	"github.com/shabunin/tiny-knx-go/internal/pretty"
+	"github.com/shabunin/tiny-knx-go/internal/vbus"
 	"github.com/shabunin/tiny-knx-go/knxnet"
 	"github.com/shabunin/tiny-knx-go/link"
 	"github.com/shabunin/tiny-knx-go/link/knxip"
@@ -58,7 +60,18 @@ func main() {
 	etsDevices := flag.String("ets", "", "individual addresses of ETS-programmable knx-demo devices")
 	data := flag.String("data", "knxvbus-data", "directory for the configuration of ETS devices")
 	trace := flag.Bool("trace", false, "print the KNXnet/IP packets")
+	sim := flag.String("sim", "", "simulated devices that ETS programs, e.g. switch,dimmer@1.1.20 (types: "+simTypes()+")")
+	speed := flag.Float64("speed", 5, "how much faster than real time room temperatures change")
+	xmlDir := flag.String("xml", "", "write the ETS product databases of the simulated devices to this directory and exit")
 	flag.Parse()
+
+	if *xmlDir != "" {
+		if err := writeProducts(*xmlDir); err != nil {
+			log.Fatal(err)
+		}
+
+		return
+	}
 
 	var ifi *net.Interface
 
@@ -92,7 +105,7 @@ func main() {
 		go printTelegrams(bus.Attach(0))
 	}
 
-	var hosted []*device.Device
+	var hosted []*hostedDevice
 
 	for _, s := range strings.Split(*devices, ",") {
 		if s = strings.TrimSpace(s); s != "" {
@@ -103,6 +116,21 @@ func main() {
 	for _, s := range strings.Split(*etsDevices, ",") {
 		if s = strings.TrimSpace(s); s != "" {
 			hosted = append(hosted, startETSDevice(bus, len(hosted)+1, parseAddress(s), *data))
+		}
+	}
+
+	var rooms *vbus.Rooms
+
+	if *sim != "" {
+		rooms = vbus.NewRooms(*speed)
+		go rooms.Run(nil)
+
+		env := &vbus.Env{Rooms: rooms}
+
+		for _, s := range strings.Split(*sim, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				hosted = append(hosted, startSimulated(bus, len(hosted)+1, s, *data, env))
+			}
 		}
 	}
 
@@ -125,8 +153,8 @@ func main() {
 	control := server.Control()
 	log.Printf("Serving %q at %v:%d, interface %v, tunnels %s", *name, net.IP(control.IP[:]), control.Port, info.Address, *tunnels)
 
-	listDevices(hosted)
-	commands(hosted)
+	listDevices(hosted, rooms)
+	commands(hosted, rooms)
 }
 
 func parseAddress(s string) cemi.IndividualAddr {
@@ -140,7 +168,7 @@ func parseAddress(s string) cemi.IndividualAddr {
 
 // startDevice runs a device with one switching object on the bus. The number makes its serial
 // number unique.
-func startDevice(bus *mock.Bus, number int, addr cemi.IndividualAddr) *device.Device {
+func startDevice(bus *mock.Bus, number int, addr cemi.IndividualAddr) *hostedDevice {
 	d, err := device.New(device.Identity{
 		SerialNumber:     apdu.SerialNumber{manufacturer >> 8, manufacturer & 0xff, 0, 0, 0, byte(number)},
 		OrderNumber:      "VBUS-" + strconv.Itoa(number),
@@ -158,20 +186,36 @@ func startDevice(bus *mock.Bus, number int, addr cemi.IndividualAddr) *device.De
 	d.OnAddressChange(func(addr cemi.IndividualAddr) { log.Printf("Device %d: address %v", number, addr) })
 	d.OnProgModeChange(func(on bool) { log.Printf("Device %d: programming mode %v", number, on) })
 	d.OnRestart(func() { log.Printf("Device %d: restart", number) })
+	run(bus, number, d)
 
-	go func() {
-		if err := d.Run(bus.Attach(addr)); err != nil {
-			log.Printf("Device %d: %v", number, err)
-		}
-	}()
-
-	return d
+	return &hostedDevice{d: d, kind: "switch object"}
 }
 
-// startETSDevice runs a knx-demo temperature sensor that ETS programs. Its configuration is stored
-// in dir, by serial number; a stored address replaces addr.
-func startETSDevice(bus *mock.Bus, number int, addr cemi.IndividualAddr, dir string) *device.Device {
+// startETSDevice runs a knx-demo temperature sensor that ETS programs.
+func startETSDevice(bus *mock.Bus, number int, addr cemi.IndividualAddr, dir string) *hostedDevice {
 	serial := apdu.SerialNumber{manufacturer >> 8, manufacturer & 0xff, 0xde, 0x30, 0, byte(number)}
+
+	d, _ := startProgrammable(bus, number, addr, dir, device.Identity{SerialNumber: serial, OrderNumber: "IA4313"}, []device.ObjectConfig{
+		{Name: "current", DPT: "9.001"},
+		{Name: "max", DPT: "9.001"},
+		{Name: "min", DPT: "9.001"},
+		{Name: "reset", DPT: "1.017"},
+	}, nil)
+
+	for _, o := range d.Objects() {
+		o.OnChange(func(o *device.Object) { log.Printf("Device %d: %s = % x", number, o.Name(), o.Value()) })
+	}
+
+	run(bus, number, d)
+
+	return &hostedDevice{d: d, kind: "knx-demo"}
+}
+
+// startProgrammable runs a device that ETS programs. Its configuration is stored in dir, by serial
+// number; a stored address replaces addr. configured, if not nil, is called after each download.
+// The caller runs the device.
+func startProgrammable(bus *mock.Bus, number int, addr cemi.IndividualAddr, dir string, identity device.Identity, objects []device.ObjectConfig, configured func()) (*device.Device, *ets.Device) {
+	serial := identity.SerialNumber
 	storage := fileStorage(filepath.Join(dir, fmt.Sprintf("%x.bin", serial[:])))
 
 	// The address is kept apart from the ETS image, like the device object in the thelsing stack.
@@ -181,15 +225,9 @@ func startETSDevice(bus *mock.Bus, number int, addr cemi.IndividualAddr, dir str
 		}
 	}
 
-	d, err := device.New(device.Identity{SerialNumber: serial, OrderNumber: "IA4313", FirmwareRevision: firmwareRevision}, device.Config{
-		Address: addr,
-		Objects: []device.ObjectConfig{
-			{Name: "current", DPT: "9.001"},
-			{Name: "max", DPT: "9.001"},
-			{Name: "min", DPT: "9.001"},
-			{Name: "reset", DPT: "1.017"},
-		},
-	})
+	identity.FirmwareRevision = firmwareRevision
+
+	d, err := device.New(identity, device.Config{Address: addr, Objects: objects})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -213,12 +251,16 @@ func startETSDevice(bus *mock.Bus, number int, addr cemi.IndividualAddr, dir str
 		}
 	}
 
-	e.OnConfigured(func() { go report() })
-	report()
+	e.OnConfigured(func() {
+		go func() {
+			report()
 
-	for _, o := range d.Objects() {
-		o.OnChange(func(o *device.Object) { log.Printf("Device %d: %s = % x", number, o.Name(), o.Value()) })
-	}
+			if configured != nil {
+				configured()
+			}
+		}()
+	})
+	report()
 
 	d.OnAddressChange(func(addr cemi.IndividualAddr) {
 		log.Printf("Device %d: address %v", number, addr)
@@ -229,13 +271,16 @@ func startETSDevice(bus *mock.Bus, number int, addr cemi.IndividualAddr, dir str
 	d.OnProgModeChange(func(on bool) { log.Printf("Device %d: programming mode %v", number, on) })
 	d.OnRestart(func() { log.Printf("Device %d: restart", number) })
 
+	return d, e
+}
+
+// run runs a device on the bus at its address.
+func run(bus *mock.Bus, number int, d *device.Device) {
 	go func() {
 		if err := d.Run(bus.Attach(d.Address())); err != nil {
 			log.Printf("Device %d: %v", number, err)
 		}
 	}()
-
-	return d
 }
 
 // fileStorage keeps an ETS image in a file.
@@ -266,58 +311,123 @@ func (f fileStorage) Save(image []byte) error {
 	return os.WriteFile(string(f), image, 0o644)
 }
 
+// A hostedDevice is a device on the virtual line, with its application if it is simulated.
+type hostedDevice struct {
+	d    *device.Device
+	kind string
+	app  vbus.App
+}
+
 var listMu sync.Mutex
 
-func listDevices(hosted []*device.Device) {
+func listDevices(hosted []*hostedDevice, rooms *vbus.Rooms) {
 	listMu.Lock()
 	defer listMu.Unlock()
 
-	for i, d := range hosted {
+	for i, h := range hosted {
 		mode := ""
-		if d.ProgMode() {
+		if h.d.ProgMode() {
 			mode = ", programming mode"
 		}
 
-		fmt.Printf("  device %d: %v%s\n", i+1, d.Address(), mode)
+		status := ""
+		if h.app != nil {
+			status = ": " + h.app.Status()
+		}
+
+		fmt.Printf("  device %d: %v %s%s%s\n", i+1, h.d.Address(), h.kind, mode, status)
+	}
+
+	if rooms != nil {
+		var temps []string
+		for room := 1; room <= vbus.NumRooms; room++ {
+			temps = append(temps, fmt.Sprintf("%d: %.1f °C", room, rooms.Temperature(room)))
+		}
+
+		fmt.Printf("  rooms %s\n", strings.Join(temps, ", "))
 	}
 }
 
 // commands reads commands from standard input until it closes.
-func commands(hosted []*device.Device) {
+func commands(hosted []*hostedDevice, rooms *vbus.Rooms) {
 	scanner := bufio.NewScanner(os.Stdin)
 
+	lookup := func(arg string) *hostedDevice {
+		n, _ := strconv.Atoi(arg)
+		if n < 1 || n > len(hosted) {
+			fmt.Println("No such device")
+			return nil
+		}
+
+		return hosted[n-1]
+	}
+
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) == 0 {
+		fields := append(strings.Fields(scanner.Text()), "", "", "", "")
+		if fields[0] == "" {
 			continue
 		}
 
 		switch fields[0] {
 		case "l":
-			listDevices(hosted)
+			listDevices(hosted, rooms)
 
 		case "p":
-			n := 1
-			if len(fields) > 1 {
-				n, _ = strconv.Atoi(fields[1])
+			if fields[1] == "" {
+				fields[1] = "1"
 			}
 
-			if n < 1 || n > len(hosted) {
-				fmt.Println("No such device")
+			h := lookup(fields[1])
+			if h == nil {
 				continue
 			}
 
-			d := hosted[n-1]
-			on := !d.ProgMode()
-
-			if len(fields) > 2 {
+			on := !h.d.ProgMode()
+			if fields[2] != "" {
 				on = fields[2] == "on"
 			}
 
-			d.SetProgMode(on)
+			h.d.SetProgMode(on)
+
+		case "b":
+			h := lookup(fields[1])
+			if h == nil {
+				continue
+			}
+
+			buttons, ok := h.app.(vbus.Presser)
+			if !ok {
+				fmt.Println("Not a push button")
+				continue
+			}
+
+			button, _ := strconv.Atoi(fields[2])
+
+			var hold time.Duration
+			if fields[3] == "long" {
+				hold = time.Second
+				if secs, err := strconv.ParseFloat(fields[4], 64); err == nil {
+					hold = time.Duration(secs * float64(time.Second))
+				}
+			}
+
+			if err := buttons.Press(button, hold); err != nil {
+				fmt.Println(err)
+			}
+
+		case "t":
+			room, _ := strconv.Atoi(fields[1])
+			temp, err := strconv.ParseFloat(fields[2], 64)
+			if room < 1 || room > vbus.NumRooms || err != nil || rooms == nil {
+				fmt.Println("Usage: t ROOM TEMP")
+				continue
+			}
+
+			rooms.SetTemperature(room, temp)
 
 		default:
-			fmt.Println("Commands: l (list devices), p N [on|off] (programming mode of device N)")
+			fmt.Println("Commands: l (list devices), p N [on|off] (programming mode of device N),")
+			fmt.Println("  b N K [long [SECS]] (press button K of push button N), t ROOM TEMP (set a room temperature)")
 		}
 	}
 

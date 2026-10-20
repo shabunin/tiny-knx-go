@@ -11,7 +11,7 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
  Package | Description
 ---------|------------------------------------------------------------------
  `cemi`  | cEMI frames: L_Data, L_Raw, L_Busmon, addresses, control fields, TPDU/APCI
- `dpt`   | Datapoint types (DPT 1, 5–14, 16–18, 20, 28, 232, 242, 251)
+ `dpt`   | Datapoint types (DPT 1, 3, 5–14, 16–18, 20, 28, 232, 242, 251)
  `apdu`  | Application layer services (group values, properties, memory, device descriptor…)
  `transport` | Transport connections: state machine without I/O, and a Client for tools
  `device` | A KNX device: group objects with flags, programming mode, individual address programming, interface objects and properties, memory services
@@ -22,10 +22,11 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
  `knxnet` | KNXnet/IP packets and the tunnelling client and server state machines, without I/O
  `link/knxip` | KNXnet/IP tunnelling client and server, routing and discovery over UDP (uses `net`)
  `ets` | Makes a device programmable by ETS as a System B device (0x07B0): table objects, load state machine, memory, parameters, persistence
+ `ets/product` | Describes the ETS product of a device in Go: writes its product database (XML for a .knxprod) and gives the firmware its group objects and parameters
  `mgmt` | Management procedures for tools: line scan, reading all properties of a device
  `serial` | Opens serial ports on Linux with the standard library only
  `cmd/knxmon` | Bus tool over kBerry, TP-UART, KNXnet/IP tunnel or routing: monitor, group reads/writes, line scan, device properties, KNXnet/IP search
- `cmd/knxvbus` | Virtual KNX line with devices, served as a KNXnet/IP interface that ETS finds and tunnels to
+ `cmd/knxvbus` | Virtual KNX line with devices, served as a KNXnet/IP interface that ETS finds and tunnels to; simulated switch, dimmer, push buttons, thermostat and heating
  `examples/pico-kberry` | Switch actuator: Pico + kBerry, LED on 1/1/1, status on 1/1/2, programming button
 
 The core packages use no `reflect`, no `net` and no third-party modules. Only `link/knxip`,
@@ -104,6 +105,33 @@ with the DLLs of the installed ETS:
 
 ```
 OpenKNXproducer-x64.exe knxprod -o knx-demo-tp.knxprod knx-demo-tp.xml
+```
+
+### A simulated installation
+
+`-sim` adds devices that ETS programs from their own products: a 2-fold switch actuator with
+staircase function, a dimmer, a 4-fold push button, a room thermostat (PI or two-point) and a
+heating actuator. Heating actuators warm one of four simulated rooms, thermostats measure it; with
+all heaters off a room cools down to 5 °C, 2000 W keep it at 30 °C. `-speed` runs the rooms faster
+than real time (5 by default).
+
+```sh
+go run ./cmd/knxvbus -xml products        # TKGSA2.xml, TKGDA1.xml, TKGPB4.xml, TKGRT1.xml, TKGHA1.xml
+go run ./cmd/knxvbus -iface eth0 -sim switch,dimmer,buttons,thermostat,heater -monitor
+```
+
+Convert the XMLs with OpenKNXproducer on the ETS computer and import the `.knxprod` files (catalog
+section "tiny-knx-go"). Every simulated device starts at 15.15.255, or at the address given as
+`dimmer@1.1.20`; program them one by one with `p N`. Parameters and group objects are those of
+`internal/vbus/products.go`; a device keeps its defaults until ETS downloads its application.
+
+Commands for the simulation:
+
+```
+l                  devices with their state, and the room temperatures
+b 3 1              short press of button 1 of device 3
+b 3 2 long 1.5     hold button 2 for 1.5 s (dims if its function is dimming)
+t 1 17             set room 1 to 17 °C, e.g. after opening a window
 ```
 
 ## Making a device programmable by ETS

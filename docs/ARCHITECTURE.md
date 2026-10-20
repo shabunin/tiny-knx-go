@@ -98,6 +98,10 @@ object table is ignored.
    machine, parameters, persistence). ETS finds the interface, programs the individual address and
    downloads the application of knx-demo-tp; the configuration survives a restart. Also tested
    with a replayed download and with Calimero/xknx as clients.
+   `ets/product` describes a product once in Go for both sides: it writes the product database
+   that OpenKNXproducer turns into a .knxprod and gives the firmware its group objects and
+   parameter offsets. `knxvbus -sim` hosts a small installation built on it (`internal/vbus`:
+   switch, dimmer, push buttons, thermostat, heating actuator, and rooms that the heating warms).
 
 ## Hardware notes
 

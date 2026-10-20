@@ -33,6 +33,10 @@ var dptTypes = map[string]func() Datapoint{
 	"1.024": func() Datapoint { return new(DPT_1024) },
 	"1.100": func() Datapoint { return new(DPT_1100) },
 
+	// 3.xxx
+	"3.007": func() Datapoint { return new(DPT_3007) },
+	"3.008": func() Datapoint { return new(DPT_3008) },
+
 	// 5.xxx
 	"5.001": func() Datapoint { return new(DPT_5001) },
 	"5.003": func() Datapoint { return new(DPT_5003) },
