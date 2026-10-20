@@ -1,7 +1,8 @@
 //go:build linux && !tinygo
 
-// Command knxmon talks to a KNX bus through a BAOS module (e.g. kBerry on a Raspberry Pi): it
-// prints every telegram and can send group reads and writes.
+// Command knxmon talks to a KNX bus: it prints every telegram, sends group reads and writes and
+// reads the identity of devices. It connects through a BAOS module (e.g. kBerry on a Raspberry
+// Pi), a TP-UART/NCN5120, a KNXnet/IP tunnel or KNXnet/IP routing.
 //
 //	knxmon -port /dev/serial0
 //	knxmon -port /dev/serial0 -write 1/1/1=1     # switch on (DPT 1)
@@ -9,6 +10,9 @@
 //	knxmon -port /dev/serial0 -read 1/1/1
 //	knxmon -port /dev/serial0 -info 1.1.3        # connect to a device and read its identity
 //	knxmon -port /dev/serial0 -address 1.1.250   # change the module's own address
+//	knxmon -port /dev/ttyUSB0 -tpuart            # TP-UART or NCN5120 instead of a BAOS module
+//	knxmon -tunnel 192.168.1.10                  # KNXnet/IP tunnelling
+//	knxmon -router -iface eth0 -address 1.1.254  # KNXnet/IP routing
 package main
 
 import (
@@ -16,58 +20,108 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/shabunin/tiny-knx-go/cemi"
+	"github.com/shabunin/tiny-knx-go/link"
 	"github.com/shabunin/tiny-knx-go/link/ft12"
+	"github.com/shabunin/tiny-knx-go/link/knxip"
+	"github.com/shabunin/tiny-knx-go/link/tpuart"
 	"github.com/shabunin/tiny-knx-go/serial"
 	"github.com/shabunin/tiny-knx-go/transport"
 )
 
+// busLink is what all links offer.
+type busLink interface {
+	link.Link
+	link.Addresser
+	Dropped() uint32
+}
+
 func main() {
-	port := flag.String("port", "/dev/serial0", "serial port of the BAOS module")
+	port := flag.String("port", "/dev/serial0", "serial port of the BAOS module or TP-UART")
 	baud := flag.Int("baud", 19200, "baud rate")
+	useTPUART := flag.Bool("tpuart", false, "the serial port has a TP-UART or NCN5120")
+	chip := flag.String("chip", "ncn5120", "TP-UART chip: ncn5120 or tpuart2")
+	tunnel := flag.String("tunnel", "", "connect to this KNXnet/IP server (host[:port])")
+	router := flag.Bool("router", false, "use KNXnet/IP routing (224.0.23.12)")
+	iface := flag.String("iface", "", "network interface for routing")
 	write := flag.String("write", "", "send a group write: GA=HEX, e.g. 1/1/1=1")
 	read := flag.String("read", "", "send a group read to GA, e.g. 1/1/1")
 	info := flag.String("info", "", "read the identity of the device at this individual address")
-	address := flag.String("address", "", "set the individual address of the module")
+	address := flag.String("address", "", "set our individual address (BAOS module, TP-UART, routing)")
 	flag.Parse()
 
-	file, err := serial.Open(*port, *baud, serial.ParityEven)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	l, err := ft12.Open(file, ft12.DefaultConfig)
-	if err != nil {
-		log.Fatalf("Opening BAOS link on %s: %v", *port, err)
-	}
-	defer l.Close()
-
-	if descriptor, err := l.ReadProperty(cemi.ObjectTypeDevice, 1, cemi.PIDDeviceDescriptor, 1, 1); err == nil {
-		log.Printf("Module ready, device descriptor %x", descriptor)
-	} else {
-		log.Printf("Module ready, device descriptor unavailable: %v", err)
-	}
+	var ia cemi.IndividualAddr
 
 	if *address != "" {
-		ia, err := cemi.NewIndividualAddrString(*address)
-		if err != nil {
+		var err error
+		if ia, err = cemi.NewIndividualAddrString(*address); err != nil {
 			log.Fatalf("Bad individual address %q: %v", *address, err)
 		}
+	}
 
-		if err := l.SetAddress(ia); err != nil {
-			log.Fatalf("Setting module address: %v", err)
+	var l busLink
+
+	switch {
+	case *tunnel != "":
+		t, err := knxip.DialTunnel(*tunnel, knxip.DefaultTunnelConfig)
+		if err != nil {
+			log.Fatalf("Connecting to %s: %v", *tunnel, err)
 		}
+
+		if ia != 0 {
+			log.Fatal("-address: the tunnel's address is assigned by the server")
+		}
+
+		l = t
+
+	case *router:
+		var ifi *net.Interface
+
+		if *iface != "" {
+			var err error
+			if ifi, err = net.InterfaceByName(*iface); err != nil {
+				log.Fatal(err)
+			}
+		}
+
+		if ia == 0 {
+			ia = cemi.NewIndividualAddr3(15, 15, 254)
+		}
+
+		r, err := knxip.ListenRouter(ifi, knxip.RouterConfig{Address: ia})
+		if err != nil {
+			log.Fatalf("Joining the routing group: %v", err)
+		}
+
+		l = r
+
+	case *useTPUART:
+		config := tpuart.DefaultConfig
+		config.Address = ia
+
+		if *chip == "tpuart2" {
+			config.Chip = tpuart.ChipTPUART2
+		}
+
+		t, err := tpuart.Open(openSerial(*port, *baud), config)
+		if err != nil {
+			log.Fatalf("Opening TP-UART on %s: %v", *port, err)
+		}
+
+		l = t
+
+	default:
+		l = openBAOS(*port, *baud, ia)
 	}
 
-	if ia, err := l.ReadAddress(); err == nil {
-		log.Printf("Module address %s", ia)
-	} else {
-		log.Printf("Module address unavailable: %v", err)
-	}
+	defer l.Close()
+
+	log.Printf("Connected, individual address %s", l.Address())
 
 	if *write != "" {
 		addr, value, ok := strings.Cut(*write, "=")
@@ -112,7 +166,44 @@ func main() {
 	os.Exit(1)
 }
 
-func send(l *ft12.Link, addr string, command cemi.APCI, data []byte) {
+func openSerial(path string, baud int) *os.File {
+	file, err := serial.Open(path, baud, serial.ParityEven)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return file
+}
+
+// openBAOS opens a BAOS module and, if ia is set, changes its address.
+func openBAOS(path string, baud int, ia cemi.IndividualAddr) *ft12.Link {
+	l, err := ft12.Open(openSerial(path, baud), ft12.DefaultConfig)
+	if err != nil {
+		log.Fatalf("Opening BAOS link on %s: %v", path, err)
+	}
+
+	if descriptor, err := l.ReadProperty(cemi.ObjectTypeDevice, 1, cemi.PIDDeviceDescriptor, 1, 1); err == nil {
+		log.Printf("Module ready, device descriptor %x", descriptor)
+	} else {
+		log.Printf("Module ready, device descriptor unavailable: %v", err)
+	}
+
+	if ia != 0 {
+		if err := l.SetAddress(ia); err != nil {
+			log.Fatalf("Setting module address: %v", err)
+		}
+	}
+
+	if ia, err := l.ReadAddress(); err == nil {
+		log.Printf("Module address %s", ia)
+	} else {
+		log.Printf("Module address unavailable: %v", err)
+	}
+
+	return l
+}
+
+func send(l link.Link, addr string, command cemi.APCI, data []byte) {
 	ga, err := cemi.NewGroupAddrString(addr)
 	if err != nil {
 		log.Fatalf("Bad group address %q: %v", addr, err)
@@ -133,7 +224,7 @@ func send(l *ft12.Link, addr string, command cemi.APCI, data []byte) {
 }
 
 // printInfo connects to a device and prints what identifies it.
-func printInfo(l *ft12.Link, addr string) {
+func printInfo(l link.Link, addr string) {
 	ia, err := cemi.NewIndividualAddrString(addr)
 	if err != nil {
 		log.Fatalf("Bad individual address %q: %v", addr, err)

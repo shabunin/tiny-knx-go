@@ -1,4 +1,4 @@
-PACKAGES := ./cemi ./dpt ./apdu ./internal/util ./link/ft12 ./link/mock ./transport
+PACKAGES := ./cemi ./dpt ./apdu ./internal/util ./link/ft12 ./link/mock ./link/tpuart ./transport ./knxnet
 # Packages whose tests do not fit the 256 KB flash of cortex-m-qemu run on riscv-qemu instead.
 LARGE    := ./device
 BOARDS   := pico esp32-coreboard-v2 xiao-esp32c3

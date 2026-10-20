@@ -31,11 +31,12 @@ Arduino, with the bus connection and the configuration source kept pluggable.
  apdu       application services incl. 10-bit APCI       done
  dpt        datapoint encoding                            done
  cemi       cEMI frames, M_Prop*, M_Reset                 done
+ knxnet     KNXnet/IP packets, tunnel client (no I/O)     done
  ─────────────────────────────────────────────────────────
  link       Link interface                                done
    ft12       BAOS / kBerry over FT1.2 (cEMI LL mode)      done
-   tpuart     NCN5120 / TP-UART2                           planned
-   knxip      KNXnet/IP routing + tunnelling client        planned
+   tpuart     NCN5120 / TP-UART2                           done (no hardware test)
+   knxip      KNXnet/IP routing + tunnelling client        done (host only: uses net)
    mock       in-memory bus for tests                      done
  ─────────────────────────────────────────────────────────
  port       io.ReadWriter: machine.UART (TinyGo), serial.Open (Linux), net.Conn
@@ -60,7 +61,10 @@ a file on Linux). Devices that are configured another way never link it.
 5. ✅ `device`: group objects with C/R/W/T/U/I flags, `device.Config` (JSON), prog mode, IA
    programming (also by serial number), device object properties, DeviceDescriptorRead, Restart.
    First real device: switch actuator on Pico + kBerry.
-6. `link/knxip` (routing for Linux/Pi, tunnelling client) and `link/tpuart`.
+6. ✅ `knxnet` (KNXnet/IP packets, search/description, tunnelling client state machine),
+   `link/knxip` (tunnelling client with reconnect, routing with busy/rate handling),
+   `link/tpuart` (TP-UART2, NCN5120/21/30), `knxmon -tunnel/-router/-tpuart`. A device takes over
+   the address of a link that assigns one (tunnel).
 7. Client tools: line scanner, property reader.
 8. `ets` module: ETS-programmable devices.
 
@@ -77,4 +81,12 @@ a file on Linux). Devices that are configured another way never link it.
   frames for it. A device on a kBerry therefore uses the module's address: `device.Run` sets it
   through `ft12.Link.SetAddress`, which writes `PID_SUBNET_ADDR` (57) and `PID_DEVICE_ADDR` (58) of
   the device object, and only when the address differs. Not yet verified on real hardware.
+- KNXnet/IP was tested against Calimero server 3.0 (tunnelling, and routing as a KNX IP router)
+  and xknx 4.0 (routing): group telegrams both ways, and `knxmon -info` through a Calimero tunnel to
+  a `device` on routing. The tunnel uses route-back HPAIs (0.0.0.0:0), which works through NAT.
+- Go's `net.ListenMulticastUDP` disables multicast loopback, so `knxip.Router` sends from a second
+  socket; otherwise programs on the same host would not see each other's frames.
+- TP-UART: no hardware available yet. Behaviour follows the thelsing stack (echo filtering, no
+  acknowledgement while sending, U_SetAddress on both chips). By default every group telegram is
+  acknowledged; set `tpuart.Config.AcceptGroup` to acknowledge only the device's group addresses.
 - Linux pseudo-terminals ignore parity, so `socat` pty pairs work for testing without hardware.

@@ -535,3 +535,44 @@ func TestConfigJSON(t *testing.T) {
 		t.Error("Unknown flag accepted")
 	}
 }
+
+// fixedAddressLink is a link whose address cannot be changed, like a KNXnet/IP tunnel.
+type fixedAddressLink struct {
+	*mock.Link
+	SetAddress struct{} // hides mock.Link.SetAddress
+}
+
+func TestRunTakesLinkAddress(t *testing.T) {
+	bus := mock.NewBus()
+	tunnelAddr := cemi.NewIndividualAddr3(1, 1, 200)
+	l := bus.Attach(tunnelAddr)
+
+	d, err := New(testIdentity, switchActuator(deviceAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changed := make(chan cemi.IndividualAddr, 1)
+	d.OnAddressChange(func(addr cemi.IndividualAddr) { changed <- addr })
+
+	done := make(chan struct{})
+
+	go func() {
+		d.Run(fixedAddressLink{Link: l})
+		close(done)
+	}()
+
+	defer func() {
+		l.Close()
+		<-done
+	}()
+
+	select {
+	case addr := <-changed:
+		if addr != tunnelAddr || d.Address() != tunnelAddr {
+			t.Errorf("Device took address %v, expected %v", addr, tunnelAddr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Device kept its address")
+	}
+}

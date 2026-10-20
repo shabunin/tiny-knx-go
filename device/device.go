@@ -174,8 +174,10 @@ func (d *Device) OnRestart(f func()) {
 	d.mu.Unlock()
 }
 
-// Run connects the device to the bus and serves it until the link closes. If the link can change
-// its individual address (link.AddressSetter), it is set to the device's address first.
+// Run connects the device to the bus and serves it until the link closes. The device and the link
+// must use the same individual address: if the link can change its address (link.AddressSetter),
+// it is set to the device's address; if the address is assigned by the link (e.g. a KNXnet/IP
+// tunnel), the device takes it over.
 func (d *Device) Run(l link.Link) error {
 	d.mu.Lock()
 	d.link = l
@@ -186,6 +188,8 @@ func (d *Device) Run(l link.Link) error {
 		if err := setter.SetAddress(addr); err != nil {
 			return err
 		}
+	} else if addresser, ok := l.(link.Addresser); ok && addresser.Address() != 0 {
+		d.locked(func(time.Time) { d.setAddress(addresser.Address()) })
 	}
 
 	// Objects with the I flag ask for their value at start.
