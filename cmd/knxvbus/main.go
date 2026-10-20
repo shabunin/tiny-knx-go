@@ -54,6 +54,7 @@ func main() {
 	monitor := flag.Bool("monitor", false, "print the telegrams on the line")
 	etsDevices := flag.String("ets", "", "individual addresses of ETS-programmable knx-demo devices")
 	data := flag.String("data", "knxvbus-data", "directory for the configuration of ETS devices")
+	trace := flag.Bool("trace", false, "print the KNXnet/IP packets")
 	flag.Parse()
 
 	var ifi *net.Interface
@@ -102,11 +103,17 @@ func main() {
 		}
 	}
 
-	server, err := knxip.ListenTunnelServer(ifi, *port, knxip.TunnelServerConfig{
+	config := knxip.TunnelServerConfig{
 		Server: knxnet.ServerConfig{Device: info, Tunnels: tunnelAddrs},
 		Attach: func(addr cemi.IndividualAddr) link.Link { return bus.Attach(addr) },
 		Log:    log.Printf,
-	})
+	}
+
+	if *trace {
+		config.Trace = printPacket
+	}
+
+	server, err := knxip.ListenTunnelServer(ifi, *port, config)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -319,4 +326,64 @@ func printTelegrams(l link.Link) {
 	for ind := range l.Inbound() {
 		log.Print(pretty.Frame(&ind.LData))
 	}
+}
+
+// printPacket prints a KNXnet/IP packet that the server received or sent.
+func printPacket(received bool, peer knxnet.HPAI, packet []byte) {
+	direction := "->"
+	if received {
+		direction = "<-"
+	}
+
+	endpoint := func(h knxnet.HPAI) string { return fmt.Sprintf("%v:%d", net.IP(h.IP[:]), h.Port) }
+
+	var text string
+
+	service, err := knxnet.Decode(packet)
+	switch s := service.(type) {
+	case nil:
+		text = fmt.Sprintf("% x (%v)", packet, err)
+	case *knxnet.ConnectRequest:
+		text = fmt.Sprintf("ConnectRequest type %d, control %s, data %s", s.Type, endpoint(s.Control), endpoint(s.Data))
+	case *knxnet.ConnectResponse:
+		text = fmt.Sprintf("ConnectResponse channel %d, %v, data %s, address %v", s.Channel, s.Status, endpoint(s.Data), s.Address)
+	case *knxnet.ConnectionStateRequest:
+		text = fmt.Sprintf("ConnectionStateRequest channel %d, control %s", s.Channel, endpoint(s.Control))
+	case *knxnet.ConnectionStateResponse:
+		text = fmt.Sprintf("ConnectionStateResponse channel %d, %v", s.Channel, s.Status)
+	case *knxnet.DisconnectRequest:
+		text = fmt.Sprintf("DisconnectRequest channel %d, control %s", s.Channel, endpoint(s.Control))
+	case *knxnet.DisconnectResponse:
+		text = fmt.Sprintf("DisconnectResponse channel %d, %v", s.Channel, s.Status)
+	case *knxnet.TunnellingRequest:
+		text = fmt.Sprintf("TunnellingRequest channel %d seq %d: %s", s.Channel, s.Sequence, message(s.Message))
+	case *knxnet.TunnellingAck:
+		text = fmt.Sprintf("TunnellingAck channel %d seq %d, %v", s.Channel, s.Sequence, s.Status)
+	case *knxnet.DeviceConfigRequest:
+		text = fmt.Sprintf("DeviceConfigRequest channel %d seq %d: %s", s.Channel, s.Sequence, message(s.Message))
+	case *knxnet.DeviceConfigAck:
+		text = fmt.Sprintf("DeviceConfigAck channel %d seq %d, %v", s.Channel, s.Sequence, s.Status)
+	default:
+		text = fmt.Sprintf("%T", service)
+	}
+
+	log.Printf("%s %s %s", direction, endpoint(peer), text)
+}
+
+// message describes a cEMI message.
+func message(m cemi.Message) string {
+	switch m := m.(type) {
+	case *cemi.LDataReq:
+		return "L_Data.req " + pretty.Frame(&m.LData)
+	case *cemi.LDataInd:
+		return "L_Data.ind " + pretty.Frame(&m.LData)
+	case *cemi.LDataCon:
+		if m.Control1&cemi.Control1HasError != 0 {
+			return "L_Data.con (negative) " + pretty.Frame(&m.LData)
+		}
+
+		return "L_Data.con " + pretty.Frame(&m.LData)
+	}
+
+	return fmt.Sprintf("%T %+v", m, m)
 }

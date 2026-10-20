@@ -311,6 +311,15 @@ func TestDownload(t *testing.T) {
 		t.Errorf("IO_LIST = % x, %v", list, err)
 	}
 
+	// ETS learns the format of the association table from the description of its PID_TABLE.
+	description, err := client.Request(apdu.PropertyDescriptionRead{Object: 2, PropertyID: pidTable}, func(a apdu.APDU) bool {
+		_, ok := a.(apdu.PropertyDescriptionResponse)
+		return ok
+	})
+	if r, _ := description.(apdu.PropertyDescriptionResponse); err != nil || r.Type != pdtGeneric04 || r.MaxElements == 0 {
+		t.Fatalf("PID_TABLE description %+v, %v", description, err)
+	}
+
 	// Verify mode: MemoryWrite is answered with the written data.
 	if got := tl.writeProperty(0, 14, []byte{0x04}); !bytes.Equal(got, []byte{0x04}) {
 		t.Fatalf("DEVICE_CONTROL = % x", got)
@@ -323,6 +332,14 @@ func TestDownload(t *testing.T) {
 	tl.load(1, addressTableData, true)
 	tl.load(2, associationTableData, true)
 	tl.load(3, groupObjectTableData, true)
+
+	if count, err := client.ReadProperty(2, pidTable, 0, 1); err != nil || !bytes.Equal(count, associationTableData[:2]) {
+		t.Errorf("PID_TABLE has % x elements, %v", count, err)
+	}
+
+	if entries, err := client.ReadProperty(2, pidTable, 2, 2); err != nil || !bytes.Equal(entries, associationTableData[6:14]) {
+		t.Errorf("PID_TABLE[2:3] = % x, %v", entries, err)
+	}
 
 	if e.Configured() {
 		t.Error("Configured before the application program was loaded")

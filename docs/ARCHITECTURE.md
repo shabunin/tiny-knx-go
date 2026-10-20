@@ -58,11 +58,16 @@ configured another way never link it.
 
 The first ETS target is `knx-demo-tp.knxprod` from the thelsing stack (manufacturer 0x00FA,
 application 0xABCE version 0x79). `ets/download_test.go` replays such a download on the mock bus;
-`cmd/knxvbus -ets` hosts the device for a real ETS. Assumptions not yet checked against ETS: the
-order of the load procedure, 12 bytes per MemoryWrite (MAX_APDU_LENGTH 15), verify mode through
-DEVICE_CONTROL, that the sending address of an object comes first in the association table, and
-that ETS ignores HARDWARE_TYPE (zeros). Not done: master reset does not clear the tables, the
-priority in the group object table is ignored.
+`cmd/knxvbus -ets` hosts the device for a real ETS, which programs its address and downloads the
+application. Seen in that download: ETS reads the description of PID_TABLE of the association
+table to learn its format (PDT_GENERIC_04: TSAP and ASAP of 16 bits) and gives up without it;
+it ignores HARDWARE_TYPE (zeros); it switches on verify mode through DEVICE_CONTROL and writes at
+most 12 bytes per MemoryWrite (MAX_APDU_LENGTH 15); it unloads objects 5 to 1 (and accepts that
+there is no object 5), starts loading and allocates the tables in the order 4, 3, 1, 2, writes
+them, and completes them in the order 4, 3, 2, 1.
+Not yet checked: objects with several addresses (whether the sending address comes first in the
+association table). Not done: master reset does not clear the tables, the priority in the group
+object table is ignored.
 
 ## Roadmap
 
@@ -83,11 +88,12 @@ priority in the group object table is ignored.
 7. ✅ Client tools: `mgmt.Scan` (parallel line scan on `transport.Conn`s, fast on acknowledged
    media), `mgmt.ReadProperties` (all interface objects, descriptions and values),
    `knxip.Search` (KNXnet/IP discovery), `knxmon -scan/-props/-search`.
-8. 🚧 ETS: `knxnet.Server` and `knxip.TunnelServer` (KNXnet/IP interface: search, extended search,
+8. ✅ ETS: `knxnet.Server` and `knxip.TunnelServer` (KNXnet/IP interface: search, extended search,
    description, tunnelling and device management connections), `cmd/knxvbus` (virtual line served
    to ETS), interface objects and memory services in `device`, `ets` (System B tables, load state
-   machine, parameters, persistence). Tested with a replayed download and with Calimero/xknx as
-   clients; waiting for a real ETS download.
+   machine, parameters, persistence). ETS finds the interface, programs the individual address and
+   downloads the application of knx-demo-tp; the configuration survives a restart. Also tested
+   with a replayed download and with Calimero/xknx as clients.
 
 ## Hardware notes
 

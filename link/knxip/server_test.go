@@ -2,7 +2,9 @@ package knxip
 
 import (
 	"errors"
+	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +20,12 @@ var (
 )
 
 func startTunnelServer(t *testing.T, bus *mock.Bus) *TunnelServer {
+	t.Helper()
+
+	return startTracedTunnelServer(t, bus, nil)
+}
+
+func startTracedTunnelServer(t *testing.T, bus *mock.Bus, trace func(bool, knxnet.HPAI, []byte)) *TunnelServer {
 	t.Helper()
 
 	control, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -37,6 +45,7 @@ func startTunnelServer(t *testing.T, bus *mock.Bus) *TunnelServer {
 		},
 		Attach: func(addr cemi.IndividualAddr) link.Link { return bus.Attach(addr) },
 		Log:    t.Logf,
+		Trace:  trace,
 	})
 
 	t.Cleanup(func() { s.Close() })
@@ -149,7 +158,18 @@ func TestTunnelServer(t *testing.T) {
 }
 
 func TestTunnelServerManagement(t *testing.T) {
-	s := startTunnelServer(t, mock.NewBus())
+	var (
+		traceMu sync.Mutex
+		traced  []string
+	)
+
+	s := startTracedTunnelServer(t, mock.NewBus(), func(received bool, _ knxnet.HPAI, packet []byte) {
+		service, _ := knxnet.Decode(packet)
+
+		traceMu.Lock()
+		traced = append(traced, fmt.Sprintf("%v %T", received, service))
+		traceMu.Unlock()
+	})
 
 	c := s.Control()
 	server := &net.UDPAddr{IP: net.IP(c.IP[:]), Port: int(c.Port)}
@@ -186,6 +206,12 @@ func TestTunnelServerManagement(t *testing.T) {
 	if d := r.(*knxnet.DescriptionResponse).Device; d.Name != "virtual bus" || !d.Supports(knxnet.FamilyDeviceManagement) {
 		t.Errorf("Description %+v", d)
 	}
+
+	traceMu.Lock()
+	if want := []string{"true *knxnet.DescriptionRequest", "false *knxnet.DescriptionResponse"}; fmt.Sprint(traced) != fmt.Sprint(want) {
+		t.Errorf("Traced %q", traced)
+	}
+	traceMu.Unlock()
 
 	r = exchange(&knxnet.ConnectRequest{Type: knxnet.DeviceManagementConnection}, func(s knxnet.Service) bool { _, ok := s.(*knxnet.ConnectResponse); return ok })
 

@@ -78,9 +78,33 @@ go run ./cmd/knxvbus -iface eth0 -devices 1.1.1 -ets 15.15.255 -monitor
 ```
 
 Type `p 2` and Enter to press the programming button of device 2, `l` to list the devices.
+`-trace` prints every KNXnet/IP packet. `-iface` must be the interface on the network of the ETS
+computer: the server answers connections only on its address there.
+
 Devices given with `-ets` are the "Temperatursensor TP" of the thelsing stack's
-`examples/knx-demo/knx-demo-tp.knxprod`: import that into ETS, program the individual address
-and download the application. Their configuration is saved in `knxvbus-data/`.
+`examples/knx-demo/knx-demo-tp.xml`: import it into ETS, program the individual address and
+download the application. Their configuration is saved in `knxvbus-data/`.
+
+Current ETS versions refuse to import the `.knxprod` that comes with the thelsing stack ("No valid
+license found to test the unregistered product(s)"). Mark the product and its application as
+registered in the XML, as the OpenKNX templates do, and convert it with
+[OpenKNXproducer](https://github.com/OpenKNX/OpenKNXproducer) on the ETS computer, which signs it
+with the DLLs of the installed ETS:
+
+```xml
+<Product Id="M-00FA_H-0124-0_P-IA4313" ...>
+  <RegistrationInfo RegistrationStatus="Registered" />
+</Product>
+...
+<Hardware2Program Id="M-00FA_H-0124-0_HP-ABCE-79-0000" MediumTypes="MT-0">
+  <ApplicationProgramRef RefId="M-00FA_A-ABCE-79-0000" />
+  <RegistrationInfo RegistrationStatus="Registered" RegistrationNumber="0001/0121" />
+</Hardware2Program>
+```
+
+```
+OpenKNXproducer-x64.exe knxprod -o knx-demo-tp.knxprod knx-demo-tp.xml
+```
 
 ## Making a device programmable by ETS
 

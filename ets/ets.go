@@ -55,6 +55,7 @@ const (
 	pidTableReference   = 7
 	pidProgVersion      = 13
 	pidPEIType          = 16
+	pidTable            = 23
 	pidMCBTable         = 27
 	pidErrorCode        = 28
 )
@@ -64,6 +65,7 @@ const (
 	pdtControl      = 0x00
 	pdtUnsignedChar = 0x02
 	pdtUnsignedLong = 0x09
+	pdtGeneric04    = 0x14
 	pdtGeneric05    = 0x15
 	pdtGeneric08    = 0x18
 	pdtEnum8        = 0x35
@@ -269,6 +271,39 @@ func (e *Device) interfaceObject(i int) device.InterfaceObject {
 				ID: pidPEIType, Type: pdtUnsignedChar, MaxElements: 1, ReadLevel: 3,
 				Read: func(uint16, uint8) []byte { return []byte{0} },
 			})
+	}
+
+	if i == associationTable {
+		// ETS reads the description of PID_TABLE to learn the format of the entries: a TSAP and an
+		// ASAP of 16 bits each.
+		entries := func() []byte {
+			if data := t.data(); len(data) >= 2 {
+				return data[2 : 2+2*len(words(data, 2))]
+			}
+
+			return nil
+		}
+
+		properties = append(properties, device.Property{
+			ID: pidTable, Type: pdtGeneric04, MaxElements: 0xffff, ReadLevel: 3,
+			Elements: func() uint16 {
+				e.mu.Lock()
+				defer e.mu.Unlock()
+
+				return uint16(len(entries()) / 4)
+			},
+			Read: func(start uint16, count uint8) []byte {
+				e.mu.Lock()
+				defer e.mu.Unlock()
+
+				data := entries()
+				if end := (int(start) - 1 + int(count)) * 4; end <= len(data) {
+					return append([]byte(nil), data[(int(start)-1)*4:end]...)
+				}
+
+				return nil
+			},
+		})
 	}
 
 	return device.InterfaceObject{Type: t.objectType, Properties: append(properties,

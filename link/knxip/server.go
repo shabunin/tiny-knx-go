@@ -23,6 +23,9 @@ type TunnelServerConfig struct {
 
 	// Log, if set, is called for connections that open and close.
 	Log func(format string, args ...any)
+
+	// Trace, if set, is called for every packet that the server receives or sends.
+	Trace func(received bool, peer knxnet.HPAI, packet []byte)
 }
 
 // A TunnelServer is a KNXnet/IP interface: it answers searches and serves tunnelling
@@ -171,6 +174,18 @@ func (s *TunnelServer) logf(format string, args ...any) {
 	}
 }
 
+func (s *TunnelServer) trace(received bool, peer knxnet.HPAI, packet []byte) {
+	if s.config.Trace != nil {
+		s.config.Trace(received, peer, packet)
+	}
+}
+
+// write sends the packet of a ServerSend event.
+func (s *TunnelServer) write(event knxnet.ServerEvent) {
+	s.trace(false, event.To, event.Packet)
+	s.control.WriteToUDP(event.Packet, &net.UDPAddr{IP: net.IP(event.To.IP[:]), Port: int(event.To.Port)})
+}
+
 func (s *TunnelServer) read(conn *net.UDPConn) {
 	defer s.wg.Done()
 
@@ -228,6 +243,7 @@ func (s *TunnelServer) serve() {
 			return
 
 		case p := <-s.packets:
+			s.trace(true, p.from, p.data)
 			s.handle(func(now time.Time) { s.server.HandlePacket(now, p.from, p.data) })
 
 		case f := <-s.frames:
@@ -262,8 +278,7 @@ func (s *TunnelServer) handle(f func(now time.Time)) {
 
 		switch event.Kind {
 		case knxnet.ServerSend:
-			to := &net.UDPAddr{IP: net.IP(event.To.IP[:]), Port: int(event.To.Port)}
-			s.control.WriteToUDP(event.Packet, to)
+			s.write(event)
 
 		case knxnet.ServerOpened:
 			if event.Address == 0 {
@@ -357,8 +372,7 @@ func (s *TunnelServer) shutdown() {
 		}
 
 		if event.Kind == knxnet.ServerSend {
-			to := &net.UDPAddr{IP: net.IP(event.To.IP[:]), Port: int(event.To.Port)}
-			s.control.WriteToUDP(event.Packet, to)
+			s.write(event)
 		}
 	}
 
