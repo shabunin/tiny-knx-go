@@ -454,3 +454,61 @@ func TestRouterMulticast(t *testing.T) {
 		t.Skip("Multicast loopback does not work here")
 	}
 }
+
+func TestSearch(t *testing.T) {
+	responder, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer responder.Close()
+
+	info := knxnet.DeviceInfo{
+		Medium:   0x02,
+		Address:  cemi.NewIndividualAddr3(1, 1, 0),
+		Name:     "test router",
+		Families: []knxnet.ServiceFamily{{ID: knxnet.FamilyTunnelling, Version: 1}},
+	}
+
+	go func() {
+		buffer := make([]byte, 512)
+
+		n, _, err := responder.ReadFromUDP(buffer)
+		if err != nil {
+			return
+		}
+
+		s, err := knxnet.Decode(buffer[:n])
+		request, ok := s.(*knxnet.SearchRequest)
+		if err != nil || !ok {
+			t.Errorf("Expected a search request, got %x", buffer[:n])
+			return
+		}
+
+		// Answer to the discovery endpoint: once with a route-back control HPAI, then again with
+		// the same endpoint spelled out, which must not be listed twice.
+		to := &net.UDPAddr{IP: net.IP(request.Discovery.IP[:]), Port: int(request.Discovery.Port)}
+		self := responder.LocalAddr().(*net.UDPAddr)
+
+		responder.WriteToUDP(knxnet.Encode(&knxnet.SearchResponse{Device: info}), to)
+
+		explicit := &knxnet.SearchResponse{Device: info, Control: knxnet.HPAI{Port: uint16(self.Port)}}
+		copy(explicit.Control.IP[:], self.IP.To4())
+		responder.WriteToUDP(knxnet.Encode(explicit), to)
+	}()
+
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	servers, err := search(conn, responder.LocalAddr().(*net.UDPAddr), 200*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(servers) != 1 || servers[0].Control.String() != responder.LocalAddr().String() ||
+		servers[0].Info.Name != "test router" || !servers[0].Info.Supports(knxnet.FamilyTunnelling) {
+		t.Errorf("Found %+v", servers)
+	}
+}

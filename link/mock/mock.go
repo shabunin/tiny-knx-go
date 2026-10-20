@@ -17,6 +17,10 @@ type Bus struct {
 	// Drop, if set, is called for every frame and may discard it. Dropped frames are still
 	// confirmed to the sender, like a frame that was lost after the bus acknowledged it.
 	Drop func(from cemi.IndividualAddr, frame *cemi.LData) bool
+
+	// ConfirmAll confirms frames to absent devices too, like KNXnet/IP routing, which has no
+	// acknowledgements.
+	ConfirmAll bool
 }
 
 // NewBus creates an empty bus.
@@ -69,8 +73,8 @@ func (l *Link) SetAddress(addr cemi.IndividualAddr) error {
 }
 
 // Send delivers the frame to all other links. Frames to an individual address are confirmed only
-// if a link with that address is attached. A source address of 0.0.0 is replaced by the link's
-// address, as a real interface does.
+// if a link with that address is attached, or with ConfirmAll. A source address of 0.0.0 is
+// replaced by the link's address, as a real interface does.
 func (l *Link) Send(req *cemi.LDataReq) error {
 	bus := l.bus
 
@@ -86,7 +90,7 @@ func (l *Link) Send(req *cemi.LDataReq) error {
 		frame.Source = l.addr
 	}
 
-	reachable := frame.Control2.IsGroupAddr()
+	reachable := frame.Control2.IsGroupAddr() || bus.ConfirmAll
 
 	for _, other := range bus.links {
 		if other != l && !other.closed && !frame.Control2.IsGroupAddr() &&

@@ -1,6 +1,8 @@
 PACKAGES := ./cemi ./dpt ./apdu ./internal/util ./link/ft12 ./link/mock ./link/tpuart ./transport ./knxnet
-# Packages whose tests do not fit the 256 KB flash of cortex-m-qemu run on riscv-qemu instead.
-LARGE    := ./device
+# Packages whose tests do not fit the 256 KB flash of cortex-m-qemu run on riscv-qemu instead, with
+# the single-core scheduler of the real boards (riscv-qemu defaults to "cores", which is very slow
+# with many timers).
+LARGE    := ./device ./mgmt
 BOARDS   := pico esp32-coreboard-v2 xiao-esp32c3
 BUILD    := build
 
@@ -17,7 +19,7 @@ test:
 # qemu-system-riscv32).
 tinygo-test:
 	for p in $(PACKAGES); do tinygo test -target=cortex-m-qemu $$p || exit 1; done
-	for p in $(LARGE); do tinygo test -target=riscv-qemu $$p || exit 1; done
+	for p in $(LARGE); do tinygo test -target=riscv-qemu -scheduler=tasks $$p || exit 1; done
 	tinygo run -target=cortex-m-qemu ./examples/smoke
 
 # Compile firmware for real boards to make sure the core stays TinyGo compatible.

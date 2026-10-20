@@ -32,6 +32,7 @@ Arduino, with the bus connection and the configuration source kept pluggable.
  dpt        datapoint encoding                            done
  cemi       cEMI frames, M_Prop*, M_Reset                 done
  knxnet     KNXnet/IP packets, tunnel client (no I/O)     done
+ mgmt       line scan, property reader                    done
  ─────────────────────────────────────────────────────────
  link       Link interface                                done
    ft12       BAOS / kBerry over FT1.2 (cEMI LL mode)      done
@@ -65,7 +66,9 @@ a file on Linux). Devices that are configured another way never link it.
    `link/knxip` (tunnelling client with reconnect, routing with busy/rate handling),
    `link/tpuart` (TP-UART2, NCN5120/21/30), `knxmon -tunnel/-router/-tpuart`. A device takes over
    the address of a link that assigns one (tunnel).
-7. Client tools: line scanner, property reader.
+7. ✅ Client tools: `mgmt.Scan` (parallel line scan on `transport.Conn`s, fast on acknowledged
+   media), `mgmt.ReadProperties` (all interface objects, descriptions and values),
+   `knxip.Search` (KNXnet/IP discovery), `knxmon -scan/-props/-search`.
 8. `ets` module: ETS-programmable devices.
 
 ## Hardware notes
@@ -84,6 +87,13 @@ a file on Linux). Devices that are configured another way never link it.
 - KNXnet/IP was tested against Calimero server 3.0 (tunnelling, and routing as a KNX IP router)
   and xknx 4.0 (routing): group telegrams both ways, and `knxmon -info` through a Calimero tunnel to
   a `device` on routing. The tunnel uses route-back HPAIs (0.0.0.0:0), which works through NAT.
+- Line scans: on TP (directly, through a BAOS module or a tunnel to a TP interface) an absent device
+  costs one unacknowledged T_Connect. Without acknowledgements (routing, Calimero's virtual subnet)
+  every address waits for the transport timeouts; 256 addresses take about 30 s with 16 probes in
+  parallel.
+- Calimero server 3.0-M2 quirk: after a client has read the association table object of
+  Calimero's own device (7.1.0), Calimero stops forwarding that tunnel address's frames to other
+  devices. Seen with `knxmon -props 7.1.0`; a new tunnel address works again.
 - Go's `net.ListenMulticastUDP` disables multicast loopback, so `knxip.Router` sends from a second
   socket; otherwise programs on the same host would not see each other's frames.
 - TP-UART: no hardware available yet. Behaviour follows the thelsing stack (echo filtering, no

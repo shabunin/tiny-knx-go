@@ -20,9 +20,10 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
  `link/ft12` | BAOS modules (kBerry) over FT1.2 serial, in cEMI data link layer mode
  `link/tpuart` | TP-UART2 and NCN5120/5121/5130 transceivers
  `knxnet` | KNXnet/IP packets and the tunnelling client state machine, without I/O
- `link/knxip` | KNXnet/IP tunnelling client and routing over UDP (uses `net`)
+ `link/knxip` | KNXnet/IP tunnelling client, routing and discovery over UDP (uses `net`)
+ `mgmt` | Management procedures for tools: line scan, reading all properties of a device
  `serial` | Opens serial ports on Linux with the standard library only
- `cmd/knxmon` | Bus monitor over kBerry, TP-UART, KNXnet/IP tunnel or routing: prints telegrams, sends reads/writes, reads device identity
+ `cmd/knxmon` | Bus tool over kBerry, TP-UART, KNXnet/IP tunnel or routing: monitor, group reads/writes, line scan, device properties, KNXnet/IP search
  `examples/pico-kberry` | Switch actuator: Pico + kBerry, LED on 1/1/1, status on 1/1/2, programming button
 
 The core packages use no `reflect`, no `net` and no third-party modules. Only `link/knxip`,
@@ -52,6 +53,9 @@ GOOS=linux GOARCH=arm64 go build ./cmd/knxmon   # GOARCH=arm GOARM=6 for 32-bit 
 ./knxmon -tunnel 192.168.1.10                   # through a KNXnet/IP interface or router
 ./knxmon -router -iface eth0 -address 1.1.254   # KNXnet/IP routing (multicast 224.0.23.12)
 ./knxmon -port /dev/ttyUSB0 -tpuart             # TP-UART / NCN5120 (-chip tpuart2 for Siemens)
+./knxmon -search                                # find KNXnet/IP interfaces and routers
+./knxmon -port /dev/serial0 -scan 1.1           # list the devices of line 1.1
+./knxmon -port /dev/serial0 -props 1.1.3        # dump all interface objects and properties
 ```
 
 On a Pico wired to the kBerry (GP0 → kBerry RX, GP1 ← kBerry TX, 3V3, GND; optional programming

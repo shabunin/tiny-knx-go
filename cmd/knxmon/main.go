@@ -13,6 +13,9 @@
 //	knxmon -port /dev/ttyUSB0 -tpuart            # TP-UART or NCN5120 instead of a BAOS module
 //	knxmon -tunnel 192.168.1.10                  # KNXnet/IP tunnelling
 //	knxmon -router -iface eth0 -address 1.1.254  # KNXnet/IP routing
+//	knxmon -search                               # find KNXnet/IP interfaces and routers
+//	knxmon -port /dev/serial0 -scan 1.1          # list the devices of line 1.1
+//	knxmon -port /dev/serial0 -props 1.1.3       # read all properties of a device
 package main
 
 import (
@@ -25,11 +28,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shabunin/tiny-knx-go/apdu"
 	"github.com/shabunin/tiny-knx-go/cemi"
+	"github.com/shabunin/tiny-knx-go/knxnet"
 	"github.com/shabunin/tiny-knx-go/link"
 	"github.com/shabunin/tiny-knx-go/link/ft12"
 	"github.com/shabunin/tiny-knx-go/link/knxip"
 	"github.com/shabunin/tiny-knx-go/link/tpuart"
+	"github.com/shabunin/tiny-knx-go/mgmt"
 	"github.com/shabunin/tiny-knx-go/serial"
 	"github.com/shabunin/tiny-knx-go/transport"
 )
@@ -48,12 +54,30 @@ func main() {
 	chip := flag.String("chip", "ncn5120", "TP-UART chip: ncn5120 or tpuart2")
 	tunnel := flag.String("tunnel", "", "connect to this KNXnet/IP server (host[:port])")
 	router := flag.Bool("router", false, "use KNXnet/IP routing (224.0.23.12)")
-	iface := flag.String("iface", "", "network interface for routing")
+	iface := flag.String("iface", "", "network interface for routing and search")
+	search := flag.Bool("search", false, "find KNXnet/IP interfaces and routers")
+	scan := flag.String("scan", "", "list the devices of a line, e.g. 1.1")
+	parallel := flag.Int("parallel", 8, "devices probed at the same time by -scan")
+	props := flag.String("props", "", "read all properties of the device at this individual address")
 	write := flag.String("write", "", "send a group write: GA=HEX, e.g. 1/1/1=1")
 	read := flag.String("read", "", "send a group read to GA, e.g. 1/1/1")
 	info := flag.String("info", "", "read the identity of the device at this individual address")
 	address := flag.String("address", "", "set our individual address (BAOS module, TP-UART, routing)")
 	flag.Parse()
+
+	var ifi *net.Interface
+
+	if *iface != "" {
+		var err error
+		if ifi, err = net.InterfaceByName(*iface); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	if *search {
+		printServers(ifi)
+		return
+	}
 
 	var ia cemi.IndividualAddr
 
@@ -80,15 +104,6 @@ func main() {
 		l = t
 
 	case *router:
-		var ifi *net.Interface
-
-		if *iface != "" {
-			var err error
-			if ifi, err = net.InterfaceByName(*iface); err != nil {
-				log.Fatal(err)
-			}
-		}
-
 		if ia == 0 {
 			ia = cemi.NewIndividualAddr3(15, 15, 254)
 		}
@@ -152,6 +167,16 @@ func main() {
 
 	if *info != "" {
 		printInfo(l, *info)
+		return
+	}
+
+	if *scan != "" {
+		scanLine(l, *scan, *parallel)
+		return
+	}
+
+	if *props != "" {
+		printProperties(l, *props)
 		return
 	}
 
@@ -269,6 +294,137 @@ func printInfo(l link.Link, addr string) {
 	}
 }
 
+// printServers lists the KNXnet/IP servers that answer a search.
+func printServers(ifi *net.Interface) {
+	servers, err := knxip.Search(ifi, 3*time.Second)
+	if err != nil {
+		log.Fatalf("Search: %v", err)
+	}
+
+	for _, s := range servers {
+		var families []string
+
+		for _, f := range s.Info.Families {
+			if name, ok := familyNames[f.ID]; ok {
+				families = append(families, fmt.Sprintf("%s v%d", name, f.Version))
+			}
+		}
+
+		fmt.Printf("%-21s %-9s %q  %s\n", s.Control, s.Info.Address, s.Info.Name, strings.Join(families, ", "))
+	}
+
+	log.Printf("%d servers found", len(servers))
+}
+
+var familyNames = map[uint8]string{
+	knxnet.FamilyCore:             "core",
+	knxnet.FamilyDeviceManagement: "device management",
+	knxnet.FamilyTunnelling:       "tunnelling",
+	knxnet.FamilyRouting:          "routing",
+}
+
+// scanLine lists the devices of a line, e.g. "1.1".
+func scanLine(l link.Link, line string, parallel int) {
+	var area, lineNo uint8
+	if _, err := fmt.Sscanf(line, "%d.%d", &area, &lineNo); err != nil || area > 15 || lineNo > 15 {
+		log.Fatalf("Bad line %q: want area.line, e.g. 1.1", line)
+	}
+
+	config := mgmt.DefaultScanConfig
+	config.Parallel = parallel
+	config.OnFound = func(f mgmt.Found) {
+		if f.Err != nil {
+			fmt.Printf("%-9s (%v)\n", f.Address, f.Err)
+		} else {
+			fmt.Printf("%-9s mask %04x\n", f.Address, f.Mask)
+		}
+	}
+
+	start := time.Now()
+
+	found, err := mgmt.Scan(l, mgmt.LineAddresses(area, lineNo), config)
+	if err != nil {
+		log.Fatalf("Scan: %v", err)
+	}
+
+	log.Printf("%d devices on line %s, scanned in %v", len(found), line, time.Since(start).Round(time.Second))
+}
+
+// printProperties connects to a device and prints the properties of all its interface objects.
+func printProperties(l link.Link, addr string) {
+	ia, err := cemi.NewIndividualAddrString(addr)
+	if err != nil {
+		log.Fatalf("Bad individual address %q: %v", addr, err)
+	}
+
+	client := transport.NewClient(l, transport.DefaultConfig)
+	defer client.Close()
+
+	if err := client.Connect(ia); err != nil {
+		log.Fatalf("Connecting to %s: %v", ia, err)
+	}
+	defer client.Disconnect()
+
+	properties, err := mgmt.ReadProperties(client, mgmt.PropertyOptions{Values: true})
+
+	object := -1
+
+	for _, p := range properties {
+		if int(p.Object) != object {
+			object = int(p.Object)
+			fmt.Printf("Object %d: %s\n", p.Object, mgmt.ObjectTypeName(p.ObjectType))
+		}
+
+		access := "r "
+		if p.WriteEnable {
+			access = "rw"
+		}
+
+		value := fmt.Sprintf("% x", p.Value)
+		if text, ok := asText(p.Type, p.Value); ok {
+			value = fmt.Sprintf("%q", text)
+		}
+
+		switch {
+		case p.Err != nil:
+			value = fmt.Sprintf("(%v)", p.Err)
+		case p.Elements == 0:
+			value = "(empty)"
+		case p.Elements > 1:
+			value = fmt.Sprintf("[%d] %s", p.Elements, value)
+		}
+
+		fmt.Printf("  %3d %-24s %s pdt %02x max %-4d %s\n",
+			p.PropertyID, mgmt.PropertyName(p.ObjectType, p.PropertyID), access, p.Type, p.MaxElements, value)
+	}
+
+	if err != nil {
+		log.Fatalf("Reading properties of %s: %v", ia, err)
+	}
+}
+
+// asText returns a property value as text if its datatype holds characters and it is printable.
+func asText(pdt uint8, value []byte) (string, bool) {
+	switch pdt {
+	case 0x01, 0x02, 0x0C, 0x0E, 0x1A, 0x2F: // char, unsigned char, char blocks, generic 10, UTF-8
+	default:
+		return "", false
+	}
+
+	text := strings.TrimRight(string(value), "\x00")
+	if len(text) < 2 {
+		return "", false
+	}
+
+	for _, c := range text {
+		if c < ' ' || c > '~' {
+			return "", false
+		}
+	}
+
+	return text, true
+}
+
 func describe(ldata *cemi.LData) string {
 	var dest string
 	if ldata.Control2.IsGroupAddr() {
@@ -289,13 +445,30 @@ func describe(ldata *cemi.LData) string {
 		}
 
 	case *cemi.AppData:
-		line += apciName(tpdu.Command)
+		// Group services and unknown ones are shown with their raw data, the rest decoded.
+		a, err := apdu.Decode(tpdu)
+		raw := err != nil
+
+		switch a.(type) {
+		case apdu.GroupValueRead, apdu.GroupValueResponse, apdu.GroupValueWrite, apdu.Unknown:
+			raw = true
+		}
+
+		if raw {
+			line += apciName(tpdu.Command)
+		} else {
+			line += strings.TrimPrefix(fmt.Sprintf("%T", a), "apdu.")
+		}
 
 		if tpdu.Numbered {
 			line += fmt.Sprintf(" seq=%d", tpdu.SeqNumber)
 		}
 
-		line += fmt.Sprintf(" % x", tpdu.Data)
+		if raw {
+			line += fmt.Sprintf(" % x", tpdu.Data)
+		} else {
+			line += fmt.Sprintf(" %+v", a)
+		}
 	}
 
 	return line

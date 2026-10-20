@@ -196,6 +196,22 @@ func (c *Client) ReadProperty(object, propertyID uint8, start uint16, count uint
 	return nil, ErrRejected
 }
 
+// DescribeProperty reads the description of a property, by its ID or, with propertyID 0, by its
+// index in the object. A description with MaxElements 0 means that there is no such property.
+func (c *Client) DescribeProperty(object, propertyID, index uint8) (apdu.PropertyDescriptionResponse, error) {
+	request := apdu.PropertyDescriptionRead{Object: object, PropertyID: propertyID, Index: index}
+
+	response, err := c.Request(request, func(a apdu.APDU) bool {
+		r, ok := a.(apdu.PropertyDescriptionResponse)
+		return ok && r.Object == object && (propertyID == 0 && r.Index == index || r.PropertyID == propertyID)
+	})
+	if err != nil {
+		return apdu.PropertyDescriptionResponse{}, err
+	}
+
+	return response.(apdu.PropertyDescriptionResponse), nil
+}
+
 // ReadMemory reads count bytes (at most 63) of device memory.
 func (c *Client) ReadMemory(address uint16, count uint8) ([]byte, error) {
 	response, err := c.Request(apdu.MemoryRead{Count: count, Address: address}, func(a apdu.APDU) bool {
