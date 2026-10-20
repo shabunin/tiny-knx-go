@@ -31,8 +31,11 @@ func (o *Object) Name() string {
 	return o.config.Name
 }
 
-// Flags returns the configured flags.
+// Flags returns the current flags.
 func (o *Object) Flags() Flags {
+	o.device.mu.Lock()
+	defer o.device.mu.Unlock()
+
 	return o.config.Flags
 }
 

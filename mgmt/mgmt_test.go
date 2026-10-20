@@ -128,7 +128,7 @@ func TestReadProperties(t *testing.T) {
 		byName[PropertyName(p.ObjectType, p.PropertyID)] = p
 	}
 
-	if len(properties) != 11 {
+	if len(properties) != 15 {
 		t.Errorf("Read %d properties", len(properties))
 	}
 

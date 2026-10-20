@@ -371,6 +371,10 @@ func TestDeviceProperties(t *testing.T) {
 		{pidDeviceAddr, []byte{50}},
 		{pidHardwareType, []byte{0, 0, 0, 0, 0, 1}},
 		{pidDeviceDescriptor, []byte{0x07, 0xb0}},
+		{pidDeviceControl, []byte{0}},
+		{pidVersion, []byte{0, 3}},
+		{pidRoutingCount, []byte{0x60}},
+		{pidIOList, []byte{0, 0}},
 	}
 
 	for _, p := range properties {

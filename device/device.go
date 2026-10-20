@@ -3,8 +3,9 @@
 // individual address.
 //
 // The configuration (individual address, group objects and their group addresses) is plain data
-// (Config), so it can be set in code, loaded from a file or a web page, or, in future, downloaded
-// by ETS.
+// (Config), so it can be set in code or loaded from a file or a web page. For a download by ETS,
+// the device offers generic interface objects (AddInterfaceObject), memory (SetMemory) and Bind;
+// package ets builds the System B tables on them.
 package device
 
 import (
@@ -29,6 +30,11 @@ type Device struct {
 	progMode bool
 	objects  []*Object
 	byGroup  map[cemi.GroupAddr][]*Object
+
+	interfaceObjects []InterfaceObject // index 0 is the device object
+	memory           Memory
+	deviceControl    uint8
+	routingCount     uint8 // hop count in bits 4–6
 
 	connConfig transport.Config
 	conn       *transport.Conn
@@ -59,11 +65,12 @@ func New(identity Identity, config Config) (*Device, error) {
 	}
 
 	d := &Device{
-		identity:   identity,
-		address:    config.Address,
-		byGroup:    make(map[cemi.GroupAddr][]*Object),
-		connConfig: transport.DefaultConfig,
-		wake:       make(chan struct{}, 1),
+		identity:     identity,
+		address:      config.Address,
+		byGroup:      make(map[cemi.GroupAddr][]*Object),
+		connConfig:   transport.DefaultConfig,
+		wake:         make(chan struct{}, 1),
+		routingCount: 6 << 4,
 	}
 
 	if d.address == 0 {
@@ -71,6 +78,7 @@ func New(identity Identity, config Config) (*Device, error) {
 	}
 
 	d.conn = transport.NewConn(d.connConfig)
+	d.addInterfaceObject(d.deviceObject())
 
 	for i, oc := range config.Objects {
 		value := []byte{0}
@@ -137,6 +145,53 @@ func (d *Device) Config() Config {
 	return config
 }
 
+// A Binding is the part of a group object's configuration that ETS downloads: its flags and group
+// addresses. The first address is used for sending.
+type Binding struct {
+	Flags     Flags
+	Addresses []cemi.GroupAddr
+}
+
+// Bind replaces the flags and group addresses of the group objects: bindings[i] applies to the
+// object with index i, objects without a binding no longer communicate. Names and DPTs stay as
+// the firmware defined them. Bind may be called while the device runs; objects with the I flag
+// then read their value from the bus.
+func (d *Device) Bind(bindings []Binding) {
+	d.locked(func(time.Time) {
+		d.byGroup = make(map[cemi.GroupAddr][]*Object)
+
+		for i, obj := range d.objects {
+			var b Binding
+			if i < len(bindings) {
+				b = bindings[i]
+			}
+
+			obj.config.Flags = b.Flags
+			obj.config.Addresses = nil
+
+			for _, ga := range b.Addresses {
+				if ga != 0 {
+					obj.config.Addresses = append(obj.config.Addresses, ga)
+					d.byGroup[ga] = append(d.byGroup[ga], obj)
+				}
+			}
+		}
+
+		if d.link != nil {
+			d.requestInitReads()
+		}
+	})
+}
+
+// requestInitReads sends a GroupValueRead for the objects with the I flag. The lock is held.
+func (d *Device) requestInitReads() {
+	for _, obj := range d.objects {
+		if obj.has(FlagCommunicate|FlagInit) && len(obj.config.Addresses) > 0 {
+			d.sendGroup(obj.config.Addresses[0], apdu.GroupValueRead{})
+		}
+	}
+}
+
 // ProgMode reports whether the device is in programming mode.
 func (d *Device) ProgMode() bool {
 	d.mu.Lock()
@@ -193,11 +248,7 @@ func (d *Device) Run(l link.Link) error {
 	}
 
 	// Objects with the I flag ask for their value at start.
-	for _, obj := range d.objects {
-		if obj.has(FlagCommunicate | FlagInit) {
-			obj.RequestRead()
-		}
-	}
+	d.locked(func(time.Time) { d.requestInitReads() })
 
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
@@ -299,7 +350,7 @@ func (d *Device) enqueue(out outgoing) {
 
 // send queues a frame from this device. The lock is held.
 func (d *Device) send(dest uint16, group bool, prio cemi.Priority, tpdu cemi.TransportUnit, conn *transport.Conn) {
-	control2 := cemi.Control2Hops(6)
+	control2 := cemi.Control2Hops(d.routingCount >> 4 & 7)
 	if group {
 		control2 |= cemi.Control2GroupAddr
 	}

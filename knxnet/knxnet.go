@@ -32,6 +32,10 @@ const (
 	ConnectionStateResponseID ServiceID = 0x0208
 	DisconnectRequestID       ServiceID = 0x0209
 	DisconnectResponseID      ServiceID = 0x020A
+	SearchRequestExtID        ServiceID = 0x020B
+	SearchResponseExtID       ServiceID = 0x020C
+	DeviceConfigRequestID     ServiceID = 0x0310
+	DeviceConfigAckID         ServiceID = 0x0311
 	TunnellingRequestID       ServiceID = 0x0420
 	TunnellingAckID           ServiceID = 0x0421
 	RoutingIndicationID       ServiceID = 0x0530
@@ -94,6 +98,11 @@ func Decode(data []byte) (Service, error) {
 		s = &SearchRequest{Discovery: r.hpai()}
 	case SearchResponseID:
 		s = &SearchResponse{Control: r.hpai(), Device: r.dibs()}
+	case SearchRequestExtID:
+		s = &SearchRequest{Discovery: r.hpai(), Extended: true}
+		r.data = nil // search request parameters are not evaluated
+	case SearchResponseExtID:
+		s = &SearchResponse{Control: r.hpai(), Device: r.dibs(), Extended: true}
 	case DescriptionRequestID:
 		s = &DescriptionRequest{Control: r.hpai()}
 	case DescriptionResponseID:
@@ -114,6 +123,12 @@ func Decode(data []byte) (Service, error) {
 		s = r.tunnellingRequest()
 	case TunnellingAckID:
 		s = r.tunnellingAck()
+	case DeviceConfigRequestID:
+		t := r.tunnellingRequest()
+		s = &DeviceConfigRequest{Channel: t.Channel, Sequence: t.Sequence, Message: t.Message}
+	case DeviceConfigAckID:
+		t := r.tunnellingAck()
+		s = &DeviceConfigAck{Channel: t.Channel, Sequence: t.Sequence, Status: t.Status}
 	case RoutingIndicationID:
 		s = &RoutingIndication{Message: r.cemi()}
 	case RoutingLostMessageID:
@@ -213,19 +228,36 @@ func appendHPAI(b []byte, h HPAI) []byte {
 // SearchRequest asks KNXnet/IP servers to describe themselves, sent to the routing group.
 type SearchRequest struct {
 	Discovery HPAI // where to send the responses
+
+	// Extended marks a SEARCH_REQUEST_EXTENDED (KNXnet/IP 2), answered with an extended
+	// response. Its search parameters are not supported.
+	Extended bool
 }
 
-func (*SearchRequest) ServiceID() ServiceID { return SearchRequestID }
+func (s *SearchRequest) ServiceID() ServiceID {
+	if s.Extended {
+		return SearchRequestExtID
+	}
+
+	return SearchRequestID
+}
 
 func (s *SearchRequest) appendBody(b []byte) []byte { return appendHPAI(b, s.Discovery) }
 
 // SearchResponse describes a KNXnet/IP server.
 type SearchResponse struct {
-	Control HPAI
-	Device  DeviceInfo
+	Control  HPAI
+	Device   DeviceInfo
+	Extended bool // a SEARCH_RESPONSE_EXTENDED
 }
 
-func (*SearchResponse) ServiceID() ServiceID { return SearchResponseID }
+func (s *SearchResponse) ServiceID() ServiceID {
+	if s.Extended {
+		return SearchResponseExtID
+	}
+
+	return SearchResponseID
+}
 
 func (s *SearchResponse) appendBody(b []byte) []byte {
 	return s.Device.appendDIBs(appendHPAI(b, s.Control))
@@ -452,6 +484,33 @@ type TunnellingAck struct {
 func (*TunnellingAck) ServiceID() ServiceID { return TunnellingAckID }
 
 func (s *TunnellingAck) appendBody(b []byte) []byte {
+	return append(b, 4, s.Channel, s.Sequence, byte(s.Status))
+}
+
+// DeviceConfigRequest carries a cEMI management message (M_PropRead and the like) over a device
+// management connection, in both directions.
+type DeviceConfigRequest struct {
+	Channel  uint8
+	Sequence uint8
+	Message  cemi.Message
+}
+
+func (*DeviceConfigRequest) ServiceID() ServiceID { return DeviceConfigRequestID }
+
+func (s *DeviceConfigRequest) appendBody(b []byte) []byte {
+	return appendCEMI(append(b, 4, s.Channel, s.Sequence, 0), s.Message)
+}
+
+// DeviceConfigAck acknowledges a DeviceConfigRequest.
+type DeviceConfigAck struct {
+	Channel  uint8
+	Sequence uint8
+	Status   Status
+}
+
+func (*DeviceConfigAck) ServiceID() ServiceID { return DeviceConfigAckID }
+
+func (s *DeviceConfigAck) appendBody(b []byte) []byte {
 	return append(b, 4, s.Channel, s.Sequence, byte(s.Status))
 }
 

@@ -14,20 +14,22 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
  `dpt`   | Datapoint types (DPT 1, 5–14, 16–18, 20, 28, 232, 242, 251)
  `apdu`  | Application layer services (group values, properties, memory, device descriptor…)
  `transport` | Transport connections: state machine without I/O, and a Client for tools
- `device` | A KNX device: group objects with flags, programming mode, individual address programming by ETS
+ `device` | A KNX device: group objects with flags, programming mode, individual address programming, interface objects and properties, memory services
  `link`  | Interface between the protocol stack and a bus connection
  `link/mock` | In-memory bus for tests
  `link/ft12` | BAOS modules (kBerry) over FT1.2 serial, in cEMI data link layer mode
  `link/tpuart` | TP-UART2 and NCN5120/5121/5130 transceivers
- `knxnet` | KNXnet/IP packets and the tunnelling client state machine, without I/O
- `link/knxip` | KNXnet/IP tunnelling client, routing and discovery over UDP (uses `net`)
+ `knxnet` | KNXnet/IP packets and the tunnelling client and server state machines, without I/O
+ `link/knxip` | KNXnet/IP tunnelling client and server, routing and discovery over UDP (uses `net`)
+ `ets` | Makes a device programmable by ETS as a System B device (0x07B0): table objects, load state machine, memory, parameters, persistence
  `mgmt` | Management procedures for tools: line scan, reading all properties of a device
  `serial` | Opens serial ports on Linux with the standard library only
  `cmd/knxmon` | Bus tool over kBerry, TP-UART, KNXnet/IP tunnel or routing: monitor, group reads/writes, line scan, device properties, KNXnet/IP search
+ `cmd/knxvbus` | Virtual KNX line with devices, served as a KNXnet/IP interface that ETS finds and tunnels to
  `examples/pico-kberry` | Switch actuator: Pico + kBerry, LED on 1/1/1, status on 1/1/2, programming button
 
 The core packages use no `reflect`, no `net` and no third-party modules. Only `link/knxip`,
-`serial` and `cmd/knxmon` use the operating system.
+`serial` and the commands use the operating system.
 
 ## Differences from knx-go
 
@@ -64,6 +66,37 @@ button GP15 → GND and LED on GP14):
 ```sh
 tinygo flash -target=pico ./examples/pico-kberry
 ```
+
+## A virtual bus for ETS
+
+`knxvbus` runs devices on an in-memory line and serves it as a KNXnet/IP interface on the LAN.
+ETS (or `knxmon -tunnel`, Calimero, xknx) finds it by search and connects by tunnelling; each
+tunnel is a participant of the line with its own address (1.1.250–253 by default).
+
+```sh
+go run ./cmd/knxvbus -iface eth0 -devices 1.1.1 -ets 15.15.255 -monitor
+```
+
+Type `p 2` and Enter to press the programming button of device 2, `l` to list the devices.
+Devices given with `-ets` are the "Temperatursensor TP" of the thelsing stack's
+`examples/knx-demo/knx-demo-tp.knxprod`: import that into ETS, program the individual address
+and download the application. Their configuration is saved in `knxvbus-data/`.
+
+## Making a device programmable by ETS
+
+```go
+d, _ := device.New(device.Identity{SerialNumber: serial, OrderNumber: "IA4313"}, device.Config{
+	Objects: []device.ObjectConfig{{Name: "current", DPT: "9.001"}, {Name: "max", DPT: "9.001"},
+		{Name: "min", DPT: "9.001"}, {Name: "reset", DPT: "1.017"}}, // ComObject numbers 1–4
+})
+e, _ := ets.Attach(d, storage) // storage keeps the download, e.g. in flash or a file
+e.OnConfigured(func() { delay := e.Param(0); _ = delay })
+d.Run(l)
+```
+
+ETS writes the group addresses, flags and parameters; the firmware defines the group objects in
+the order of the product database. The serial number must start with the manufacturer ID of the
+product.
 
 ## Writing a device
 

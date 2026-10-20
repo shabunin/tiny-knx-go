@@ -147,10 +147,19 @@ func (l *Link) Inbound() <-chan *cemi.LDataInd {
 // Close detaches the link from the bus.
 func (l *Link) Close() error {
 	l.once.Do(func() {
-		l.bus.mu.Lock()
+		bus := l.bus
+		bus.mu.Lock()
 		l.closed = true
 		close(l.inbound)
-		l.bus.mu.Unlock()
+
+		for i, other := range bus.links {
+			if other == l {
+				bus.links = append(bus.links[:i], bus.links[i+1:]...)
+				break
+			}
+		}
+
+		bus.mu.Unlock()
 	})
 
 	return nil

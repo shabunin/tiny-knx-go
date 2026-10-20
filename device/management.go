@@ -69,8 +69,36 @@ func (d *Device) handleManagement(request apdu.APDU, connected bool) apdu.APDU {
 		return apdu.KeyResponse{Level: 0xFF} // keys cannot be changed
 
 	case apdu.MemoryRead:
-		// The device has no memory that ETS could use; an empty response rejects the read.
-		return apdu.MemoryResponse{Address: request.Address}
+		// An empty response rejects the read.
+		return apdu.MemoryResponse{Address: request.Address, Data: d.readMemory(uint32(request.Address), request.Count)}
+
+	case apdu.MemoryWrite:
+		ok := d.memory != nil && d.memory.WriteMemory(uint32(request.Address), request.Data)
+
+		// In verify mode, ETS expects the written data back.
+		if d.deviceControl&deviceControlVerify != 0 {
+			var data []byte
+			if ok {
+				data = d.readMemory(uint32(request.Address), uint8(len(request.Data)))
+			}
+
+			return apdu.MemoryResponse{Address: request.Address, Data: data}
+		}
+
+	case apdu.MemoryExtRead:
+		data := d.readMemory(request.Address, request.Count)
+		if data == nil {
+			return apdu.MemoryExtReadResponse{Code: apdu.ReturnMemoryError, Address: request.Address}
+		}
+
+		return apdu.MemoryExtReadResponse{Code: apdu.ReturnSuccess, Address: request.Address, Data: data}
+
+	case apdu.MemoryExtWrite:
+		if d.memory == nil || !d.memory.WriteMemory(request.Address, request.Data) {
+			return apdu.MemoryExtWriteResponse{Code: apdu.ReturnMemoryError, Address: request.Address}
+		}
+
+		return apdu.MemoryExtWriteResponse{Code: apdu.ReturnSuccess, Address: request.Address}
 
 	case apdu.ADCRead:
 		return apdu.ADCResponse{Channel: request.Channel} // count 0: no ADC
@@ -79,151 +107,16 @@ func (d *Device) handleManagement(request apdu.APDU, connected bool) apdu.APDU {
 	return nil
 }
 
-// Property IDs of the device object (interface object 0).
-const (
-	pidObjectType       = 1
-	pidFirmwareRevision = 9
-	pidSerialNumber     = 11
-	pidManufacturerID   = 12
-	pidOrderInfo        = 15
-	pidProgMode         = 54
-	pidMaxAPDULength    = 56
-	pidSubnetAddr       = 57
-	pidDeviceAddr       = 58
-	pidHardwareType     = 78
-	pidDeviceDescriptor = 83
-)
-
-// Property datatypes (PDT).
-const (
-	pdtUnsignedChar = 0x02
-	pdtUnsignedInt  = 0x04
-	pdtGeneric02    = 0x12
-	pdtGeneric06    = 0x16
-	pdtGeneric10    = 0x1A
-	pdtBitset8      = 0x33
-)
-
-// deviceProperties lists the properties of the device object in index order.
-var deviceProperties = []struct {
-	id       uint8
-	pdt      uint8
-	writable bool
-}{
-	{pidObjectType, pdtUnsignedInt, false},
-	{pidFirmwareRevision, pdtUnsignedChar, false},
-	{pidSerialNumber, pdtGeneric06, false},
-	{pidManufacturerID, pdtUnsignedInt, false},
-	{pidOrderInfo, pdtGeneric10, false},
-	{pidProgMode, pdtBitset8, true},
-	{pidMaxAPDULength, pdtUnsignedInt, false},
-	{pidSubnetAddr, pdtUnsignedChar, false},
-	{pidDeviceAddr, pdtUnsignedChar, false},
-	{pidHardwareType, pdtGeneric06, false},
-	{pidDeviceDescriptor, pdtGeneric02, false},
-}
-
-// propertyValue returns the value of a device object property. The lock is held.
-func (d *Device) propertyValue(id uint8) ([]byte, bool) {
-	ident := d.identity
-
-	switch id {
-	case pidObjectType:
-		return []byte{0, 0}, true
-	case pidFirmwareRevision:
-		return []byte{ident.FirmwareRevision}, true
-	case pidSerialNumber:
-		return ident.SerialNumber[:], true
-	case pidManufacturerID:
-		return ident.SerialNumber[:2], true
-	case pidOrderInfo:
-		order := make([]byte, 10)
-		copy(order, ident.OrderNumber)
-		return order, true
-	case pidProgMode:
-		if d.progMode {
-			return []byte{1}, true
-		}
-		return []byte{0}, true
-	case pidMaxAPDULength:
-		return []byte{0, 15}, true // standard frames
-	case pidSubnetAddr:
-		return []byte{byte(d.address >> 8)}, true
-	case pidDeviceAddr:
-		return []byte{byte(d.address)}, true
-	case pidHardwareType:
-		return ident.HardwareType[:], true
-	case pidDeviceDescriptor:
-		return []byte{byte(ident.MaskVersion >> 8), byte(ident.MaskVersion)}, true
+// readMemory reads count bytes of memory, or returns nil. The lock is held.
+func (d *Device) readMemory(address uint32, count uint8) []byte {
+	if d.memory == nil || count == 0 {
+		return nil
 	}
 
-	return nil, false
-}
-
-func rejected(ref apdu.PropertyRef) apdu.PropertyValueResponse {
-	ref.Count = 0
-	return apdu.PropertyValueResponse{PropertyRef: ref}
-}
-
-func (d *Device) readProperty(ref apdu.PropertyRef) apdu.APDU {
-	if ref.Object != 0 || ref.Count != 1 {
-		return rejected(ref)
+	data := make([]byte, count)
+	if !d.memory.ReadMemory(address, data) {
+		return nil
 	}
 
-	value, ok := d.propertyValue(ref.PropertyID)
-
-	switch {
-	case !ok:
-		return rejected(ref)
-
-	case ref.Start == 0: // index 0 holds the number of elements
-		return apdu.PropertyValueResponse{PropertyRef: ref, Data: []byte{0, 1}}
-
-	case ref.Start == 1:
-		return apdu.PropertyValueResponse{PropertyRef: ref, Data: append([]byte(nil), value...)}
-	}
-
-	return rejected(ref)
-}
-
-func (d *Device) writeProperty(ref apdu.PropertyRef, data []byte) apdu.APDU {
-	if ref.Object != 0 || ref.PropertyID != pidProgMode || ref.Count != 1 || ref.Start != 1 || len(data) < 1 {
-		return rejected(ref)
-	}
-
-	d.setProgMode(data[0]&1 == 1)
-
-	return d.readProperty(ref)
-}
-
-func (d *Device) describeProperty(request apdu.PropertyDescriptionRead) apdu.APDU {
-	response := apdu.PropertyDescriptionResponse{
-		Object:     request.Object,
-		PropertyID: request.PropertyID,
-		Index:      request.Index,
-	}
-
-	if request.Object != 0 {
-		return response // MaxElements 0: no such property
-	}
-
-	for i, p := range deviceProperties {
-		if (request.PropertyID != 0 && p.id == request.PropertyID) ||
-			(request.PropertyID == 0 && i == int(request.Index)) {
-			response.PropertyID = p.id
-			response.Index = uint8(i)
-			response.Type = p.pdt
-			response.WriteEnable = p.writable
-			response.MaxElements = 1
-			response.ReadLevel = 3
-
-			if p.writable {
-				response.WriteLevel = 3
-			}
-
-			return response
-		}
-	}
-
-	return response
+	return data
 }
