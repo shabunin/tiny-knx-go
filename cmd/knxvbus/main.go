@@ -44,6 +44,9 @@ import (
 // The manufacturer of the hosted devices: 0x00FA, as in the demo products of the thelsing stack.
 const manufacturer = 0x00FA
 
+// The firmware revision of the hosted devices, shown by ETS as the firmware version 0.1.
+const firmwareRevision = 1
+
 func main() {
 	iface := flag.String("iface", "", "network interface to serve on (default: all, searches on the default)")
 	port := flag.Int("port", knxnet.Port, "UDP port for connections")
@@ -139,8 +142,9 @@ func parseAddress(s string) cemi.IndividualAddr {
 // number unique.
 func startDevice(bus *mock.Bus, number int, addr cemi.IndividualAddr) *device.Device {
 	d, err := device.New(device.Identity{
-		SerialNumber: apdu.SerialNumber{manufacturer >> 8, manufacturer & 0xff, 0, 0, 0, byte(number)},
-		OrderNumber:  "VBUS-" + strconv.Itoa(number),
+		SerialNumber:     apdu.SerialNumber{manufacturer >> 8, manufacturer & 0xff, 0, 0, 0, byte(number)},
+		OrderNumber:      "VBUS-" + strconv.Itoa(number),
+		FirmwareRevision: firmwareRevision,
 	}, device.Config{
 		Address: addr,
 		Objects: []device.ObjectConfig{
@@ -177,7 +181,7 @@ func startETSDevice(bus *mock.Bus, number int, addr cemi.IndividualAddr, dir str
 		}
 	}
 
-	d, err := device.New(device.Identity{SerialNumber: serial, OrderNumber: "IA4313"}, device.Config{
+	d, err := device.New(device.Identity{SerialNumber: serial, OrderNumber: "IA4313", FirmwareRevision: firmwareRevision}, device.Config{
 		Address: addr,
 		Objects: []device.ObjectConfig{
 			{Name: "current", DPT: "9.001"},

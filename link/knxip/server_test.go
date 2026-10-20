@@ -223,6 +223,7 @@ func TestTunnelServerManagement(t *testing.T) {
 		data  []byte
 	}{
 		{cemi.MProp{ObjectType: 0, PropertyID: 11, Count: 1, Start: 1}, 1, []byte{0x00, 0xfa, 1, 2, 3, 4}},
+		{cemi.MProp{ObjectType: 0, PropertyID: 83, Count: 1, Start: 1}, 1, []byte{0x09, 0x1a}},
 		{cemi.MProp{ObjectType: 11, PropertyID: 53, Count: 1, Start: 0}, 1, []byte{0, 2}},
 		{cemi.MProp{ObjectType: 11, PropertyID: 53, Count: 2, Start: 1}, 2, []byte{0x11, 250, 0x11, 251}},
 		{cemi.MProp{ObjectType: 8, PropertyID: 52, Count: 1, Start: 1}, 1, []byte{0}},

@@ -27,6 +27,11 @@ type ServerConfig struct {
 
 	// QueueSize limits the messages waiting for a busy client; more are dropped.
 	QueueSize int
+
+	// FirstChannel is the channel ID of the first connection (0 means 1). A server that restarts
+	// should start somewhere else, so that a client still holding a channel of the previous run
+	// does not talk to a new connection.
+	FirstChannel uint8
 }
 
 // DefaultServerConfig contains the timings from the KNXnet/IP specification.
@@ -123,7 +128,7 @@ func NewServer(config ServerConfig) *Server {
 		}
 	}
 
-	return &Server{config: config}
+	return &Server{config: config, next: config.FirstChannel - 1}
 }
 
 // SetDevice changes the description of the server, e.g. its programming mode status.

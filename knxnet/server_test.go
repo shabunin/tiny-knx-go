@@ -226,6 +226,29 @@ func TestServerNoMoreTunnels(t *testing.T) {
 	}
 }
 
+func TestServerFirstChannel(t *testing.T) {
+	s := NewServer(ServerConfig{Control: serverEndpoint, FirstChannel: 255})
+
+	// Channel IDs start at FirstChannel and skip 0 when they wrap.
+	for _, want := range []uint8{255, 1, 2} {
+		s.HandlePacket(t0, clientEndpoint, Encode(&ConnectRequest{Type: DeviceManagementConnection}))
+		s.NextEvent()
+
+		if opened, _ := s.NextEvent(); opened.Kind != ServerOpened || opened.Channel != want {
+			t.Errorf("Opened %+v, expected channel %d", opened, want)
+		}
+	}
+
+	// By default, the first channel is 1.
+	s = NewServer(ServerConfig{Control: serverEndpoint})
+	s.HandlePacket(t0, clientEndpoint, Encode(&ConnectRequest{Type: DeviceManagementConnection}))
+	s.NextEvent()
+
+	if opened, _ := s.NextEvent(); opened.Channel != 1 {
+		t.Errorf("First channel %d", opened.Channel)
+	}
+}
+
 func TestServerTimeouts(t *testing.T) {
 	// A client that does not acknowledge loses its connection.
 	p := connectPair(t)

@@ -1,6 +1,7 @@
 package knxip
 
 import (
+	"math/rand/v2"
 	"net"
 	"sync"
 	"time"
@@ -13,7 +14,7 @@ import (
 // TunnelServerConfig configures a TunnelServer.
 type TunnelServerConfig struct {
 	// Server holds the description of the server, the tunnel addresses and the timings. Its
-	// Control endpoint is filled in from the socket if it is zero.
+	// Control endpoint is filled in from the socket if it is zero, its FirstChannel at random.
 	Server knxnet.ServerConfig
 
 	// Attach connects a tunnel to the bus, with the tunnel address. The server closes the link
@@ -114,6 +115,10 @@ func NewTunnelServer(control, search *net.UDPConn, config TunnelServerConfig) *T
 		c.Protocol = knxnet.ProtocolUDP
 		c.Port = uint16(self.Port)
 		copy(c.IP[:], self.IP.To4())
+	}
+
+	if config.Server.FirstChannel == 0 {
+		config.Server.FirstChannel = uint8(rand.Uint32())
 	}
 
 	s := &TunnelServer{
@@ -394,6 +399,7 @@ const (
 	pidSerialNumber   = 11
 	pidManufacturerID = 12
 	pidMaxAPDULength  = 56
+	pidDescriptor     = 83
 	pidMediumType     = 51 // cEMI server object
 	pidKNXAddress     = 52 // KNXnet/IP parameter object
 	pidAdditionalIA   = 53
@@ -403,6 +409,10 @@ const (
 
 	errVoidProperty = 0x07
 	errReadOnly     = 0x05
+
+	// maskVersion is the device descriptor of a KNXnet/IP router with tunnelling, like the
+	// 0x091A device of the thelsing stack.
+	maskVersion = 0x091A
 )
 
 // management answers a message from a device management connection.
@@ -466,6 +476,8 @@ func (s *TunnelServer) property(objectType uint16, id uint8) ([]byte, int) {
 			return info.SerialNumber[:2], 2
 		case pidMaxAPDULength:
 			return []byte{0, 15}, 2
+		case pidDescriptor:
+			return []byte{maskVersion >> 8, maskVersion & 0xff}, 2
 		}
 
 	case cemi.ObjectTypeCEMIServer:
