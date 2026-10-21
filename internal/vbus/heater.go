@@ -37,9 +37,14 @@ func newHeater(c config) *heatingActuator {
 	return h
 }
 
-// Configure closes the valve; the room may have changed.
+// Configure keeps the valve where it is and applies it to the room and power of the parameters,
+// which a download may have changed.
 func (h *heatingActuator) Configure() {
-	h.set(0)
+	h.mu.Lock()
+	valve := h.valve
+	h.mu.Unlock()
+
+	h.set(valve)
 }
 
 func (h *heatingActuator) set(valve float64) {

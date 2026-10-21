@@ -453,3 +453,43 @@ func TestControlLoop(t *testing.T) {
 		t.Errorf("Room 1 = %.2f °C, want 21 °C", got)
 	}
 }
+
+// TestThermostatResend checks that an unchanged control value is sent again every minute.
+func TestThermostatResend(t *testing.T) {
+	tb := newTestBus(t)
+	th := tb.thermostat(defaults(Thermostat))
+
+	now := time.Now()
+	th.step(now)
+	tb.expect(3, dpt.DPT_5001(100), time.Second)
+
+	for i := 1; i <= 12; i++ {
+		th.step(now.Add(time.Duration(i) * controlEvery))
+	}
+
+	tb.expect(3, dpt.DPT_5001(100), time.Second)
+}
+
+// TestHeaterReconfigure checks that a download keeps the valve and moves the heat to the new room.
+func TestHeaterReconfigure(t *testing.T) {
+	tb := newTestBus(t)
+
+	p := defaults(Heater)
+	app := tb.start("heater", p, 1, 2, 3)
+
+	tb.write(1, dpt.DPT_5001(50))
+	tb.expect(3, dpt.DPT_5001(50), time.Second)
+
+	p.set(Heater, "room", 3)
+	app.Configure()
+
+	if got, want := app.Status(), "room 3: valve 50 %, 1000 W"; got != want {
+		t.Errorf("Status = %q, want %q", got, want)
+	}
+
+	tb.env.Rooms.Step(time.Minute)
+
+	if tb.env.Rooms.Temperature(3) <= tb.env.Rooms.Temperature(1) {
+		t.Errorf("Room 3 (%.2f °C) is not warmer than room 1 (%.2f °C)", tb.env.Rooms.Temperature(3), tb.env.Rooms.Temperature(1))
+	}
+}

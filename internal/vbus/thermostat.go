@@ -23,6 +23,10 @@ const (
 	gain         = 50.0
 	integralTime = 120.0 // s
 	controlEvery = 5 * time.Second
+
+	// The control value is sent again every resendEvery, so that an actuator that restarted, e.g.
+	// after a download, gets it back.
+	resendEvery = time.Minute
 )
 
 // measureEvery is a variable for the tests, which drive the thermostat themselves.
@@ -40,6 +44,7 @@ type thermostat struct {
 	integral float64
 	output   float64 // %, continuous
 	heating  bool    // two-point
+	outputAt time.Time
 	lastRun  time.Time
 	started  bool
 }
@@ -125,13 +130,14 @@ func (th *thermostat) step(now time.Time) {
 			dt = 0
 		}
 
-		th.control(dt)
+		th.control(now, dt)
 	}
 }
 
-func (th *thermostat) control(dt float64) {
+func (th *thermostat) control(now time.Time, dt float64) {
 	th.mu.Lock()
 	diff := th.setpoint - th.actual
+	resend := now.Sub(th.outputAt) >= resendEvery
 
 	if th.param("control") == 1 {
 		hysteresis := float64(th.param("hysteresis")) / 10
@@ -146,10 +152,16 @@ func (th *thermostat) control(dt float64) {
 		changed := heating != th.heating || dt == 0
 		th.heating = heating
 		actual, setpoint := th.actual, th.setpoint
+		if changed || resend {
+			th.outputAt = now
+		}
 		th.mu.Unlock()
 
 		if changed {
 			th.logf("%.1f °C, setpoint %.1f °C: heating %s", actual, setpoint, onOff(heating))
+		}
+
+		if changed || resend {
 			th.object(thermoOnOff).Set(dpt.DPT_1001(heating))
 		}
 
@@ -163,10 +175,16 @@ func (th *thermostat) control(dt float64) {
 	changed := output != th.output || dt == 0
 	th.output = output
 	actual, setpoint := th.actual, th.setpoint
+	if changed || resend {
+		th.outputAt = now
+	}
 	th.mu.Unlock()
 
 	if changed {
 		th.logf("%.1f °C, setpoint %.1f °C: heating %.0f %%", actual, setpoint, output)
+	}
+
+	if changed || resend {
 		th.object(thermoOutput).Set(dpt.DPT_5001(output))
 	}
 }

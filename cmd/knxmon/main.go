@@ -5,9 +5,9 @@
 // Pi), a TP-UART/NCN5120, a KNXnet/IP tunnel or KNXnet/IP routing.
 //
 //	knxmon -port /dev/serial0
-//	knxmon -port /dev/serial0 -write 1/1/1=1     # switch on (DPT 1)
+//	knxmon -port /dev/serial0 -write 1/1/1=1     # switch on (DPT 1) and exit
 //	knxmon -port /dev/serial0 -write 1/1/2=0c1a  # 2 bytes, e.g. DPT 9 = 21.0 °C
-//	knxmon -port /dev/serial0 -read 1/1/1
+//	knxmon -port /dev/serial0 -read 1/1/1        # read, then monitor to see the response
 //	knxmon -port /dev/serial0 -info 1.1.3        # connect to a device and read its identity
 //	knxmon -port /dev/serial0 -address 1.1.250   # change the module's own address
 //	knxmon -port /dev/ttyUSB0 -tpuart            # TP-UART or NCN5120 instead of a BAOS module
@@ -159,6 +159,10 @@ func main() {
 		}
 
 		send(l, addr, cemi.GroupValueWrite, data)
+
+		if *read == "" {
+			return
+		}
 	}
 
 	if *read != "" {
