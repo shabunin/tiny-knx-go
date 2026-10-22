@@ -1,7 +1,9 @@
 package knxip
 
 import (
+	"encoding/binary"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net"
 	"sync"
@@ -42,6 +44,11 @@ type TunnelServer struct {
 	control *net.UDPConn
 	search  *net.UDPConn
 
+	// Connections over TCP: the listener and the open streams by peer.
+	listener  *net.TCPListener
+	streamsMu sync.Mutex
+	streams   map[knxnet.HPAI]net.Conn
+
 	mu     sync.Mutex
 	server *knxnet.Server
 
@@ -55,8 +62,9 @@ type TunnelServer struct {
 }
 
 type serverPacket struct {
-	from knxnet.HPAI
-	data []byte
+	from   knxnet.HPAI
+	data   []byte
+	closed bool // the TCP stream from the peer closed
 }
 
 // A frame from the bus to a tunnel, or the result of sending one from it (req set).
@@ -79,9 +87,9 @@ type serverTunnel struct {
 	sending sync.Mutex
 }
 
-// ListenTunnelServer serves on the given network interface: connections on port (3671 if zero) of
-// its IPv4 address and searches on the routing multicast group. The control socket may share the
-// port with routing participants on the same host.
+// ListenTunnelServer serves on the given network interface: connections over UDP and TCP on port
+// (3671 if zero) of its IPv4 address and searches on the routing multicast group. The control
+// socket may share the port with routing participants on the same host.
 func ListenTunnelServer(ifi *net.Interface, port int, config TunnelServerConfig) (*TunnelServer, error) {
 	if port == 0 {
 		port = knxnet.Port
@@ -105,12 +113,26 @@ func ListenTunnelServer(ifi *net.Interface, port int, config TunnelServerConfig)
 		return nil, err
 	}
 
-	return NewTunnelServer(control, search, config), nil
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: ip, Port: control.LocalAddr().(*net.UDPAddr).Port})
+	if err != nil {
+		search.Close()
+		control.Close()
+
+		return nil, err
+	}
+
+	return newTunnelServer(control, search, listener, config), nil
 }
 
 // NewTunnelServer serves connections on control and, if it is not nil, searches arriving on
 // search. It takes ownership of both sockets.
 func NewTunnelServer(control, search *net.UDPConn, config TunnelServerConfig) *TunnelServer {
+	return newTunnelServer(control, search, nil, config)
+}
+
+func newTunnelServer(control, search *net.UDPConn, listener *net.TCPListener, config TunnelServerConfig) *TunnelServer {
+	config.Server.TCP = listener != nil
+
 	if c := &config.Server.Control; c.Port == 0 {
 		self := control.LocalAddr().(*net.UDPAddr)
 		c.Protocol = knxnet.ProtocolUDP
@@ -123,9 +145,11 @@ func NewTunnelServer(control, search *net.UDPConn, config TunnelServerConfig) *T
 	}
 
 	s := &TunnelServer{
-		config:  config,
-		control: control,
-		search:  search,
+		config:   config,
+		control:  control,
+		search:   search,
+		listener: listener,
+		streams:  make(map[knxnet.HPAI]net.Conn),
 		server:  knxnet.NewServer(config.Server),
 		packets: make(chan serverPacket, 16),
 		frames:  make(chan tunnelFrame, 64),
@@ -141,6 +165,12 @@ func NewTunnelServer(control, search *net.UDPConn, config TunnelServerConfig) *T
 		s.wg.Add(1)
 
 		go s.read(search)
+	}
+
+	if listener != nil {
+		s.wg.Add(1)
+
+		go s.accept()
 	}
 
 	go s.serve()
@@ -169,6 +199,8 @@ func (s *TunnelServer) Close() error {
 		if s.search != nil {
 			s.search.Close()
 		}
+
+		s.closeStreams()
 	})
 
 	return nil
@@ -189,7 +221,105 @@ func (s *TunnelServer) trace(received bool, peer knxnet.HPAI, packet []byte) {
 // write sends the packet of a ServerSend event.
 func (s *TunnelServer) write(event knxnet.ServerEvent) {
 	s.trace(false, event.To, event.Packet)
+
+	if event.To.Protocol == knxnet.ProtocolTCP {
+		s.streamsMu.Lock()
+		conn := s.streams[event.To]
+		s.streamsMu.Unlock()
+
+		if conn != nil {
+			conn.SetWriteDeadline(time.Now().Add(time.Second))
+			conn.Write(event.Packet)
+		}
+
+		return
+	}
+
 	s.control.WriteToUDP(event.Packet, &net.UDPAddr{IP: net.IP(event.To.IP[:]), Port: int(event.To.Port)})
+}
+
+// accept takes connections over TCP.
+func (s *TunnelServer) accept() {
+	defer s.wg.Done()
+
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			if isClosed(err) {
+				return
+			}
+
+			continue
+		}
+
+		var peer knxnet.HPAI
+		addr := conn.RemoteAddr().(*net.TCPAddr)
+		peer.Protocol = knxnet.ProtocolTCP
+		peer.Port = uint16(addr.Port)
+		copy(peer.IP[:], addr.IP.To4())
+
+		s.streamsMu.Lock()
+		s.streams[peer] = conn
+		s.streamsMu.Unlock()
+
+		s.logf("TCP connection from %v", conn.RemoteAddr())
+		s.wg.Add(1)
+
+		go s.readStream(conn, peer)
+	}
+}
+
+// readStream reads the packets of a TCP stream, and reports when it closes.
+func (s *TunnelServer) readStream(conn net.Conn, peer knxnet.HPAI) {
+	defer s.wg.Done()
+
+	for {
+		header := make([]byte, 6)
+		if _, err := io.ReadFull(conn, header); err != nil {
+			break
+		}
+
+		total := int(binary.BigEndian.Uint16(header[4:]))
+		if header[0] != 6 || total < 6 || total > 1024 {
+			break
+		}
+
+		packet := make([]byte, total)
+		copy(packet, header)
+
+		if _, err := io.ReadFull(conn, packet[6:]); err != nil {
+			break
+		}
+
+		select {
+		case s.packets <- serverPacket{from: peer, data: packet}:
+		case <-s.done:
+			return
+		}
+	}
+
+	conn.Close()
+
+	s.streamsMu.Lock()
+	delete(s.streams, peer)
+	s.streamsMu.Unlock()
+
+	select {
+	case s.packets <- serverPacket{from: peer, closed: true}:
+	case <-s.done:
+	}
+}
+
+func (s *TunnelServer) closeStreams() {
+	if s.listener != nil {
+		s.listener.Close()
+	}
+
+	s.streamsMu.Lock()
+	for _, conn := range s.streams {
+		conn.Close()
+	}
+	s.streamsMu.Unlock()
 }
 
 func (s *TunnelServer) read(conn *net.UDPConn) {
@@ -249,6 +379,13 @@ func (s *TunnelServer) serve() {
 			return
 
 		case p := <-s.packets:
+			if p.closed {
+				s.logf("TCP connection from %s:%d closed", net.IP(p.from.IP[:]), p.from.Port)
+				s.handle(func(time.Time) { s.server.StreamClosed(p.from) })
+
+				continue
+			}
+
 			s.trace(true, p.from, p.data)
 			s.handle(func(now time.Time) { s.server.HandlePacket(now, p.from, p.data) })
 
@@ -397,6 +534,7 @@ func (s *TunnelServer) shutdown() {
 	}
 
 	s.control.Close()
+	s.closeStreams()
 	s.wg.Wait()
 }
 

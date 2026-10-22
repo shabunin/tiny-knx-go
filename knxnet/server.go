@@ -38,6 +38,10 @@ type ServerConfig struct {
 
 	// Secure, if set, makes tunnelling and device management need a secure session.
 	Secure *SecureConfig
+
+	// TCP tells that the caller also takes connections over TCP, which the server then
+	// announces as KNXnet/IP core v2. ETS opens secure sessions only over TCP.
+	TCP bool
 }
 
 // DefaultServerConfig contains the timings from the KNXnet/IP specification.
@@ -106,6 +110,10 @@ type serverConn struct {
 	repeated bool
 
 	session *session // nil for plain connections
+
+	// stream is true for connections over TCP, whose requests are not acknowledged: the stream
+	// delivers them reliably and in order.
+	stream bool
 }
 
 // A Server is the server side of KNXnet/IP: it answers searches and description requests and
@@ -114,7 +122,9 @@ type serverConn struct {
 // from NextEvent.
 //
 // Endpoints are HPAIs. The caller passes the source of every packet; route-back HPAIs in requests
-// (0.0.0.0:0, used by clients behind NAT) are replaced by it.
+// (0.0.0.0:0, used by clients behind NAT and over TCP) are replaced by it. For TCP, the source is
+// an HPAI with ProtocolTCP and the address of the peer of the stream, and packets for it go back
+// on that stream; the caller reports closed streams with StreamClosed.
 type Server struct {
 	config ServerConfig
 	conns  []*serverConn
@@ -147,8 +157,13 @@ func NewServer(config ServerConfig) *Server {
 	}
 
 	if len(config.Device.Families) == 0 {
+		core := uint8(1)
+		if config.TCP {
+			core = 2
+		}
+
 		config.Device.Families = []ServiceFamily{
-			{FamilyCore, 1}, {FamilyDeviceManagement, 1}, {FamilyTunnelling, 1},
+			{FamilyCore, core}, {FamilyDeviceManagement, 1}, {FamilyTunnelling, 1},
 		}
 	}
 
@@ -299,6 +314,23 @@ func (s *Server) Connections() map[uint8]cemi.IndividualAddr {
 	return m
 }
 
+// StreamClosed closes the connections and secure sessions on a TCP stream that closed.
+func (s *Server) StreamClosed(peer HPAI) {
+	for i := 0; i < len(s.sessions); i++ {
+		if sess := s.sessions[i]; sess.control == peer {
+			s.closeSession(sess, SessionClose)
+			i--
+		}
+	}
+
+	for i := 0; i < len(s.conns); i++ {
+		if c := s.conns[i]; c.stream && c.control == peer {
+			s.remove(c)
+			i--
+		}
+	}
+}
+
 // Disconnect closes a connection, telling the client.
 func (s *Server) Disconnect(channel uint8) {
 	if c := s.conn(channel); c != nil {
@@ -391,7 +423,7 @@ func (s *Server) connect(now time.Time, control, data HPAI, r *ConnectRequest) {
 		s.reply(control, &ConnectResponse{Status: status})
 	}
 
-	c := &serverConn{control: control, data: data, lastActive: now, session: s.current}
+	c := &serverConn{control: control, data: data, lastActive: now, session: s.current, stream: control.Protocol == ProtocolTCP}
 
 	switch r.Type {
 	case TunnelConnection:
@@ -431,9 +463,14 @@ func (s *Server) connect(now time.Time, control, data HPAI, r *ConnectRequest) {
 	c.channel = s.next
 	s.conns = append(s.conns, c)
 
+	dataEndpoint := s.config.Control
+	if c.stream {
+		dataEndpoint = HPAI{Protocol: ProtocolTCP}
+	}
+
 	s.reply(control, &ConnectResponse{
 		Channel: c.channel,
-		Data:    s.config.Control,
+		Data:    dataEndpoint,
 		Type:    r.Type,
 		Address: c.address,
 	})
@@ -458,6 +495,10 @@ next:
 // request handles a TUNNELLING_REQUEST or DEVICE_CONFIGURATION_REQUEST.
 func (s *Server) request(now time.Time, from HPAI, channel, seq uint8, msg cemi.Message, tunnel bool) {
 	ack := func(c *serverConn, status Status) {
+		if from.Protocol == ProtocolTCP {
+			return
+		}
+
 		var service Service = &TunnellingAck{Channel: channel, Sequence: seq, Status: status}
 		if !tunnel {
 			service = &DeviceConfigAck{Channel: channel, Sequence: seq, Status: status}
@@ -477,9 +518,11 @@ func (s *Server) request(now time.Time, from HPAI, channel, seq uint8, msg cemi.
 		return
 	}
 
-	switch seq {
-	case c.seqRecv:
-	case c.seqRecv - 1:
+	switch {
+	case c.stream:
+		c.seqRecv = seq
+	case seq == c.seqRecv:
+	case seq == c.seqRecv-1:
 		ack(c, StatusOK) // our acknowledgement got lost
 		return
 	default:
@@ -503,7 +546,7 @@ func (s *Server) request(now time.Time, from HPAI, channel, seq uint8, msg cemi.
 
 func (s *Server) acked(now time.Time, channel, seq uint8, status Status, tunnel bool) {
 	c := s.peer(channel)
-	if c == nil || c.tunnel != tunnel || c.pending == nil || seq != c.seqSend {
+	if c == nil || c.tunnel != tunnel || c.stream || c.pending == nil || seq != c.seqSend {
 		return
 	}
 
@@ -516,8 +559,19 @@ func (s *Server) acked(now time.Time, channel, seq uint8, status Status, tunnel 
 	s.flush(now, c)
 }
 
-// flush sends the next queued message of a connection if none is pending.
+// flush sends the next queued message of a connection if none is pending, or all of them over
+// TCP.
 func (s *Server) flush(now time.Time, c *serverConn) {
+	for ; c.stream && len(c.queue) > 0; c.queue = c.queue[1:] {
+		var service Service = &TunnellingRequest{Channel: c.channel, Sequence: c.seqSend, Message: c.queue[0]}
+		if !c.tunnel {
+			service = &DeviceConfigRequest{Channel: c.channel, Sequence: c.seqSend, Message: c.queue[0]}
+		}
+
+		c.seqSend++
+		s.sendVia(c.session, c.data, Encode(service))
+	}
+
 	if c.pending != nil || len(c.queue) == 0 {
 		return
 	}

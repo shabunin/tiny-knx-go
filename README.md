@@ -137,8 +137,9 @@ t 1 17             set room 1 to 17 °C, e.g. after opening a window
 
 ### KNX IP Secure
 
-With `-password`, the interface needs a secure session (KNX IP Secure, over UDP) for tunnelling and
-device management, and rejects plain connections. The management user 1 and one tunnelling user
+With `-password`, the interface needs a secure session (KNX IP Secure) for tunnelling and device
+management, and rejects plain connections. knxvbus takes connections over UDP and TCP; ETS opens
+secure sessions only over TCP, and authenticates as the management user 1. The management user 1 and one tunnelling user
 per tunnel (2 and up) share the password; `-auth` sets the device authentication code with which
 the interface proves itself.
 
