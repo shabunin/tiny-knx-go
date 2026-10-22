@@ -19,7 +19,8 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
  `link/mock` | In-memory bus for tests
  `link/ft12` | BAOS modules (kBerry) over FT1.2 serial, in cEMI data link layer mode
  `link/tpuart` | TP-UART2 and NCN5120/5121/5130 transceivers
- `knxnet` | KNXnet/IP packets and the tunnelling client and server state machines, without I/O
+ `knxnet` | KNXnet/IP packets and the tunnelling client and server state machines, without I/O, with KNX IP Secure sessions
+ `secure` | KNX Data Secure (A_SecureService, AES-128 CCM, sync requests) and the cryptography of KNX IP Secure
  `link/knxip` | KNXnet/IP tunnelling client and server, routing and discovery over UDP (uses `net`)
  `ets` | Makes a device programmable by ETS as a System B device (0x07B0): table objects, load state machine, memory, parameters, persistence
  `ets/product` | Describes the ETS product of a device in Go: writes its product database (XML for a .knxprod) and gives the firmware its group objects and parameters
@@ -133,6 +134,21 @@ b 3 1              short press of button 1 of device 3
 b 3 2 long 1.5     hold button 2 for 1.5 s (dims if its function is dimming)
 t 1 17             set room 1 to 17 °C, e.g. after opening a window
 ```
+
+### KNX IP Secure
+
+With `-password`, the interface needs a secure session (KNX IP Secure, over UDP) for tunnelling and
+device management, and rejects plain connections. The management user 1 and one tunnelling user
+per tunnel (2 and up) share the password; `-auth` sets the device authentication code with which
+the interface proves itself.
+
+```sh
+go run ./cmd/knxvbus -iface eth0 -sim switch -password tinyknx -auth tinyauth
+go run ./cmd/knxmon -tunnel 192.168.1.10 -password tinyknx -auth tinyauth -write 1/0/1=1
+```
+
+`secure` is checked against the examples of AN158 and AN159 and against telegrams of an ETS project
+that xknx and calimero test with.
 
 ## Making a device programmable by ETS
 

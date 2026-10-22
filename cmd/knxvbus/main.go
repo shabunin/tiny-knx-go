@@ -41,6 +41,7 @@ import (
 	"github.com/shabunin/tiny-knx-go/link"
 	"github.com/shabunin/tiny-knx-go/link/knxip"
 	"github.com/shabunin/tiny-knx-go/link/mock"
+	"github.com/shabunin/tiny-knx-go/secure"
 )
 
 // The manufacturer of the hosted devices: 0x00FA, as in the demo products of the thelsing stack.
@@ -63,6 +64,8 @@ func main() {
 	sim := flag.String("sim", "", "simulated devices that ETS programs, e.g. switch,dimmer@1.1.20 (types: "+simTypes()+")")
 	speed := flag.Float64("speed", 5, "how much faster than real time room temperatures change")
 	xmlDir := flag.String("xml", "", "write the ETS product databases of the simulated devices to this directory and exit")
+	password := flag.String("password", "", "enable KNX IP Secure: the password of the management user 1 and the tunnelling users")
+	authCode := flag.String("auth", "", "device authentication code of the interface, with -password")
 	flag.Parse()
 
 	if *xmlDir != "" {
@@ -138,6 +141,11 @@ func main() {
 		Server: knxnet.ServerConfig{Device: info, Tunnels: tunnelAddrs},
 		Attach: func(addr cemi.IndividualAddr) link.Link { return bus.Attach(addr) },
 		Log:    log.Printf,
+	}
+
+	if *password != "" {
+		config.Server.Secure = secureConfig(*password, *authCode, len(tunnelAddrs))
+		log.Printf("KNX IP Secure: users 1 to %d with the password, device authentication code %q", 1+len(tunnelAddrs), *authCode)
 	}
 
 	if *trace {
@@ -500,4 +508,17 @@ func message(m cemi.Message) string {
 	}
 
 	return fmt.Sprintf("%T %+v", m, m)
+}
+
+// secureConfig gives the management user and a tunnelling user per tunnel the same password, as
+// ETS does not tell which user it will authenticate as before it tries.
+func secureConfig(password, authCode string, tunnels int) *knxnet.SecureConfig {
+	key := secure.UserPasswordKey(password)
+	users := map[uint8][16]byte{}
+
+	for user := 1; user <= 1+tunnels; user++ {
+		users[uint8(user)] = key
+	}
+
+	return &knxnet.SecureConfig{DeviceAuth: secure.DeviceAuthKey(authCode), Users: users}
 }

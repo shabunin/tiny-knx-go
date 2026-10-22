@@ -1,6 +1,7 @@
 package knxip
 
 import (
+	"fmt"
 	"math/rand/v2"
 	"net"
 	"sync"
@@ -286,13 +287,21 @@ func (s *TunnelServer) handle(f func(now time.Time)) {
 			s.write(event)
 
 		case knxnet.ServerOpened:
+			secured := ""
+			if event.Session != 0 {
+				secured = fmt.Sprintf(" in secure session %d of user %d", event.Session, event.User)
+			}
+
 			if event.Address == 0 {
-				s.logf("Management connection %d opened", event.Channel)
+				s.logf("Management connection %d opened%s", event.Channel, secured)
 				continue
 			}
 
-			s.logf("Tunnel %d opened with address %v", event.Channel, event.Address)
+			s.logf("Tunnel %d opened with address %v%s", event.Channel, event.Address, secured)
 			s.open(event.Channel, event.Address)
+
+		case knxnet.ServerSecure:
+			s.logf("Secure session %d of user %d: %s", event.Session, event.User, event.Code.String())
 
 		case knxnet.ServerClosed:
 			s.logf("Connection %d closed", event.Channel)

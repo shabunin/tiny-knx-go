@@ -5,13 +5,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/shabunin/tiny-knx-go/cemi"
 )
 
 func mustHex(s string) []byte {
-	b, err := hex.DecodeString(s)
+	b, err := hex.DecodeString(strings.ReplaceAll(s, " ", ""))
 	if err != nil {
 		panic(err)
 	}

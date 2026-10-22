@@ -1,6 +1,8 @@
 package knxnet
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"time"
 
 	"github.com/shabunin/tiny-knx-go/cemi"
@@ -9,7 +11,8 @@ import (
 // ServerConfig configures a Server. Zero durations take the values of DefaultServerConfig.
 type ServerConfig struct {
 	// Device describes the server in search and description responses. The service families
-	// core, device management and tunnelling are added if Families is empty.
+	// core, device management and tunnelling are added if Families is empty, and security if
+	// Secure is set.
 	Device DeviceInfo
 
 	// Control is the endpoint that search responses advertise for connections.
@@ -32,6 +35,9 @@ type ServerConfig struct {
 	// should start somewhere else, so that a client still holding a channel of the previous run
 	// does not talk to a new connection.
 	FirstChannel uint8
+
+	// Secure, if set, makes tunnelling and device management need a secure session.
+	Secure *SecureConfig
 }
 
 // DefaultServerConfig contains the timings from the KNXnet/IP specification.
@@ -61,6 +67,10 @@ const (
 	// *cemi.MPropReadReq) from a device management connection, which the caller answers with
 	// Indicate.
 	ServerMessage
+
+	// ServerSecure reports the authentication of a user in a secure session, or the end of the
+	// session: Code is SessionAuthenticated, SessionAuthFailed, SessionClose or SessionTimeout.
+	ServerSecure
 )
 
 // A ServerEvent is an output of a Server.
@@ -71,6 +81,12 @@ type ServerEvent struct {
 	Packet  []byte              // for ServerSend
 	To      HPAI                // for ServerSend
 	Message cemi.Message        // for ServerMessage
+
+	// Session and User identify the secure session of a connection or a ServerSecure event, User
+	// is zero for plain connections.
+	Session uint16
+	User    uint8
+	Code    SessionCode // for ServerSecure
 }
 
 // A connection of a Server.
@@ -88,6 +104,8 @@ type serverConn struct {
 	pending  []byte
 	sentAt   time.Time
 	repeated bool
+
+	session *session // nil for plain connections
 }
 
 // A Server is the server side of KNXnet/IP: it answers searches and description requests and
@@ -101,6 +119,12 @@ type Server struct {
 	config ServerConfig
 	conns  []*serverConn
 	next   uint8 // last channel ID
+
+	secure      *SecureConfig
+	deviceAuth  cipher.Block
+	sessions    []*session
+	lastSession uint16
+	current     *session // the session of the packet being handled
 
 	events []ServerEvent
 	read   int
@@ -128,13 +152,33 @@ func NewServer(config ServerConfig) *Server {
 		}
 	}
 
-	return &Server{config: config, next: config.FirstChannel - 1}
+	s := &Server{config: config, next: config.FirstChannel - 1}
+
+	if config.Secure != nil {
+		s.secure = config.Secure.withDefaults()
+		s.deviceAuth, _ = aes.NewCipher(s.secure.DeviceAuth[:])
+
+		d := &s.config.Device
+		if !d.Supports(FamilySecurity) {
+			d.Families = append(d.Families[:len(d.Families):len(d.Families)], ServiceFamily{FamilySecurity, 1})
+		}
+
+		if len(d.Secured) == 0 {
+			d.Secured = []ServiceFamily{{FamilyDeviceManagement, 1}, {FamilyTunnelling, 1}}
+		}
+	}
+
+	return s
 }
 
 // SetDevice changes the description of the server, e.g. its programming mode status.
 func (s *Server) SetDevice(info DeviceInfo) {
 	if len(info.Families) == 0 {
 		info.Families = s.config.Device.Families
+	}
+
+	if len(info.Secured) == 0 {
+		info.Secured = s.config.Device.Secured
 	}
 
 	s.config.Device = info
@@ -178,6 +222,12 @@ func (s *Server) Deadline() (time.Time, bool) {
 		}
 	}
 
+	for _, sess := range s.sessions {
+		if deadline := sess.lastActive.Add(s.secure.SessionTimeout); earliest.IsZero() || deadline.Before(earliest) {
+			earliest = deadline
+		}
+	}
+
 	return earliest, !earliest.IsZero()
 }
 
@@ -201,7 +251,15 @@ func (s *Server) Tick(now time.Time) {
 
 			c.repeated = true
 			c.sentAt = now
-			s.send(c.data, c.pending)
+			s.sendVia(c.session, c.data, c.pending)
+		}
+	}
+
+	for i := 0; i < len(s.sessions); i++ {
+		if sess := s.sessions[i]; !now.Before(sess.lastActive.Add(s.secure.SessionTimeout)) {
+			s.sendVia(sess, sess.control, Encode(&SessionStatus{Code: SessionTimeout}))
+			s.closeSession(sess, SessionTimeout)
+			i--
 		}
 	}
 }
@@ -255,13 +313,36 @@ func (s *Server) HandlePacket(now time.Time, from HPAI, packet []byte) {
 		return
 	}
 
-	route := func(h HPAI) HPAI {
-		if h.IsRouteBack() {
-			return from
-		}
+	if s.secure != nil {
+		switch r := service.(type) {
+		case *SessionRequest:
+			s.sessionRequest(now, routeBack(r.Control, from), r)
+			return
 
-		return h
+		case *SecureWrapper:
+			s.wrapped(now, from, r)
+			return
+
+		case *ConnectRequest:
+			s.reply(routeBack(r.Control, from), &ConnectResponse{Status: StatusConnectionType})
+			return
+		}
 	}
+
+	s.handle(now, from, service)
+}
+
+func routeBack(h, from HPAI) HPAI {
+	if h.IsRouteBack() {
+		return from
+	}
+
+	return h
+}
+
+// handle processes a plain packet, or the packet of a secure session in s.current.
+func (s *Server) handle(now time.Time, from HPAI, service Service) {
+	route := func(h HPAI) HPAI { return routeBack(h, from) }
 
 	switch r := service.(type) {
 	case *SearchRequest:
@@ -275,7 +356,7 @@ func (s *Server) HandlePacket(now time.Time, from HPAI, packet []byte) {
 
 	case *ConnectionStateRequest:
 		status := StatusConnectionID
-		if c := s.conn(r.Channel); c != nil {
+		if c := s.peer(r.Channel); c != nil {
 			status = StatusOK
 			c.lastActive = now
 		}
@@ -284,7 +365,7 @@ func (s *Server) HandlePacket(now time.Time, from HPAI, packet []byte) {
 
 	case *DisconnectRequest:
 		status := StatusConnectionID
-		if c := s.conn(r.Channel); c != nil {
+		if c := s.peer(r.Channel); c != nil {
 			status = StatusOK
 			s.remove(c)
 		}
@@ -310,7 +391,7 @@ func (s *Server) connect(now time.Time, control, data HPAI, r *ConnectRequest) {
 		s.reply(control, &ConnectResponse{Status: status})
 	}
 
-	c := &serverConn{control: control, data: data, lastActive: now}
+	c := &serverConn{control: control, data: data, lastActive: now, session: s.current}
 
 	switch r.Type {
 	case TunnelConnection:
@@ -329,6 +410,10 @@ func (s *Server) connect(now time.Time, control, data HPAI, r *ConnectRequest) {
 		c.address = addr
 
 	case DeviceManagementConnection:
+		if c.session != nil && c.session.user != 1 {
+			fail(StatusConnectionType)
+			return
+		}
 
 	default:
 		fail(StatusConnectionType)
@@ -352,7 +437,7 @@ func (s *Server) connect(now time.Time, control, data HPAI, r *ConnectRequest) {
 		Type:    r.Type,
 		Address: c.address,
 	})
-	s.emit(ServerEvent{Kind: ServerOpened, Channel: c.channel, Address: c.address})
+	s.emit(ServerEvent{Kind: ServerOpened, Channel: c.channel, Address: c.address, Session: c.sessionID(), User: c.user()})
 }
 
 func (s *Server) freeTunnel() (cemi.IndividualAddr, bool) {
@@ -386,7 +471,7 @@ func (s *Server) request(now time.Time, from HPAI, channel, seq uint8, msg cemi.
 		s.reply(to, service)
 	}
 
-	c := s.conn(channel)
+	c := s.peer(channel)
 	if c == nil || c.tunnel != tunnel {
 		ack(nil, StatusConnectionID)
 		return
@@ -413,11 +498,11 @@ func (s *Server) request(now time.Time, from HPAI, channel, seq uint8, msg cemi.
 		req.Source = c.address
 	}
 
-	s.emit(ServerEvent{Kind: ServerMessage, Channel: channel, Address: c.address, Message: msg})
+	s.emit(ServerEvent{Kind: ServerMessage, Channel: channel, Address: c.address, Message: msg, Session: c.sessionID(), User: c.user()})
 }
 
 func (s *Server) acked(now time.Time, channel, seq uint8, status Status, tunnel bool) {
-	c := s.conn(channel)
+	c := s.peer(channel)
 	if c == nil || c.tunnel != tunnel || c.pending == nil || seq != c.seqSend {
 		return
 	}
@@ -445,11 +530,11 @@ func (s *Server) flush(now time.Time, c *serverConn) {
 	c.pending = Encode(service)
 	c.sentAt = now
 	c.repeated = false
-	s.send(c.data, c.pending)
+	s.sendVia(c.session, c.data, c.pending)
 }
 
 func (s *Server) disconnect(c *serverConn) {
-	s.reply(c.control, &DisconnectRequest{Channel: c.channel, Control: s.config.Control})
+	s.sendVia(c.session, c.control, Encode(&DisconnectRequest{Channel: c.channel, Control: s.config.Control}))
 	s.remove(c)
 }
 
@@ -461,7 +546,7 @@ func (s *Server) remove(c *serverConn) {
 		}
 	}
 
-	s.emit(ServerEvent{Kind: ServerClosed, Channel: c.channel, Address: c.address})
+	s.emit(ServerEvent{Kind: ServerClosed, Channel: c.channel, Address: c.address, Session: c.sessionID(), User: c.user()})
 }
 
 func (s *Server) conn(channel uint8) *serverConn {
@@ -474,12 +559,35 @@ func (s *Server) conn(channel uint8) *serverConn {
 	return nil
 }
 
-func (s *Server) reply(to HPAI, service Service) {
-	s.send(to, Encode(service))
+// peer returns the connection on a channel if it belongs to the session of the packet being
+// handled.
+func (s *Server) peer(channel uint8) *serverConn {
+	if c := s.conn(channel); c != nil && c.session == s.current {
+		return c
+	}
+
+	return nil
 }
 
-func (s *Server) send(to HPAI, packet []byte) {
-	s.emit(ServerEvent{Kind: ServerSend, Packet: packet, To: to})
+func (c *serverConn) sessionID() uint16 {
+	if c.session == nil {
+		return 0
+	}
+
+	return c.session.id
+}
+
+func (c *serverConn) user() uint8 {
+	if c.session == nil {
+		return 0
+	}
+
+	return c.session.user
+}
+
+// reply answers the packet being handled, in its session.
+func (s *Server) reply(to HPAI, service Service) {
+	s.sendVia(s.current, to, Encode(service))
 }
 
 func (s *Server) emit(event ServerEvent) {

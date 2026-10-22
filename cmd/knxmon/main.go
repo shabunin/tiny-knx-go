@@ -36,6 +36,7 @@ import (
 	"github.com/shabunin/tiny-knx-go/link/knxip"
 	"github.com/shabunin/tiny-knx-go/link/tpuart"
 	"github.com/shabunin/tiny-knx-go/mgmt"
+	"github.com/shabunin/tiny-knx-go/secure"
 	"github.com/shabunin/tiny-knx-go/serial"
 	"github.com/shabunin/tiny-knx-go/transport"
 )
@@ -63,6 +64,9 @@ func main() {
 	read := flag.String("read", "", "send a group read to GA, e.g. 1/1/1")
 	info := flag.String("info", "", "read the identity of the device at this individual address")
 	address := flag.String("address", "", "set our individual address (BAOS module, TP-UART, routing)")
+	user := flag.Int("user", 2, "user ID for a secure tunnel, with -password")
+	password := flag.String("password", "", "open the tunnel in a KNX IP Secure session with this user password")
+	authCode := flag.String("auth", "", "device authentication code of the interface, checked if set (with -password)")
 	flag.Parse()
 
 	var ifi *net.Interface
@@ -92,7 +96,15 @@ func main() {
 
 	switch {
 	case *tunnel != "":
-		t, err := knxip.DialTunnel(*tunnel, knxip.DefaultTunnelConfig)
+		config := knxip.DefaultTunnelConfig
+		if *password != "" {
+			config.Tunnel.Secure = &knxnet.TunnelSecure{User: uint8(*user), Password: secure.UserPasswordKey(*password)}
+			if *authCode != "" {
+				config.Tunnel.Secure.DeviceAuth = secure.DeviceAuthKey(*authCode)
+			}
+		}
+
+		t, err := knxip.DialTunnel(*tunnel, config)
 		if err != nil {
 			log.Fatalf("Connecting to %s: %v", *tunnel, err)
 		}
@@ -314,6 +326,17 @@ func printServers(ifi *net.Interface) {
 			}
 		}
 
+		var secured []string
+		for _, f := range s.Info.Secured {
+			if name, ok := familyNames[f.ID]; ok {
+				secured = append(secured, name)
+			}
+		}
+
+		if len(secured) > 0 {
+			families = append(families, "secure "+strings.Join(secured, " and "))
+		}
+
 		fmt.Printf("%-21s %-9s %q  %s\n", s.Control, s.Info.Address, s.Info.Name, strings.Join(families, ", "))
 	}
 
@@ -325,6 +348,7 @@ var familyNames = map[uint8]string{
 	knxnet.FamilyDeviceManagement: "device management",
 	knxnet.FamilyTunnelling:       "tunnelling",
 	knxnet.FamilyRouting:          "routing",
+	knxnet.FamilySecurity:         "security",
 }
 
 // scanLine lists the devices of a line, e.g. "1.1".

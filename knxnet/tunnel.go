@@ -1,10 +1,17 @@
 package knxnet
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdh"
+	"crypto/rand"
+	"crypto/subtle"
 	"errors"
+	"io"
 	"time"
 
 	"github.com/shabunin/tiny-knx-go/cemi"
+	"github.com/shabunin/tiny-knx-go/secure"
 )
 
 // TunnelConfig configures a Tunnel. Zero fields take the values of DefaultTunnelConfig.
@@ -28,6 +35,29 @@ type TunnelConfig struct {
 
 	// DisconnectTimeout is how long Disconnect waits for the DISCONNECT_RESPONSE.
 	DisconnectTimeout time.Duration
+
+	// Secure, if set, opens the tunnel in a secure session (KNX IP Secure). The heartbeat then
+	// comes at least every 50 seconds, within the 60-second timeout of sessions.
+	Secure *TunnelSecure
+}
+
+// TunnelSecure configures the secure session of a Tunnel.
+type TunnelSecure struct {
+	// User is the user ID: 2 and up for tunnelling users, 1 for the management user.
+	User uint8
+
+	// Password is the key of the user's password (secure.UserPasswordKey).
+	Password [16]byte
+
+	// DeviceAuth is the key of the server's device authentication code (secure.DeviceAuthKey).
+	// If it is zero, the server is not checked.
+	DeviceAuth [16]byte
+
+	// Serial is the serial number of the client in its secure wrappers.
+	Serial [6]byte
+
+	// Random is the source of the session key pair. Nil means crypto/rand.
+	Random io.Reader
 }
 
 // DefaultTunnelConfig contains the timings from the KNXnet/IP specification.
@@ -72,6 +102,10 @@ func (cfg TunnelConfig) withDefaults() TunnelConfig {
 		cfg.DisconnectTimeout = d.DisconnectTimeout
 	}
 
+	if cfg.Secure != nil {
+		cfg.HeartbeatInterval = min(cfg.HeartbeatInterval, 50*time.Second)
+	}
+
 	return cfg
 }
 
@@ -83,6 +117,8 @@ var (
 	ErrAckTimeout       = errors.New("knxnet: tunnelling request not acknowledged")
 	ErrHeartbeatTimeout = errors.New("knxnet: no response to connection state request")
 	ErrClosedByServer   = errors.New("knxnet: tunnel closed by server")
+	ErrNoSession        = errors.New("knxnet: server has no free secure session")
+	ErrDeviceAuth       = errors.New("knxnet: server failed device authentication")
 )
 
 // TunnelState is the state of a Tunnel.
@@ -156,6 +192,15 @@ type Tunnel struct {
 	heartbeat  time.Time // next CONNECTIONSTATE_REQUEST, or deadline of its response
 	heartbeats int       // unanswered CONNECTIONSTATE_REQUESTs
 
+	// The secure session: key is set once the server answered the SESSION_REQUEST.
+	session       uint16
+	key           cipher.Block
+	private       *ecdh.PrivateKey
+	public        [PublicKeySize]byte
+	seqSecure     uint64 // sequence number of the next SECURE_WRAPPER
+	seqSecureRecv uint64 // lowest valid sequence number from the server
+	authenticated bool
+
 	events []Event
 	next   int
 }
@@ -219,8 +264,13 @@ func (t *Tunnel) Connect(now time.Time) {
 
 	*t = Tunnel{config: t.config, events: t.events, next: t.next}
 	t.state = TunnelConnecting
-	t.send(&ConnectRequest{Type: TunnelConnection, Layer: t.config.Layer}, false)
 	t.setTimer(now, t.config.ConnectTimeout)
+
+	if t.config.Secure == nil {
+		t.send(&ConnectRequest{Type: TunnelConnection, Layer: t.config.Layer}, false)
+	} else if err := t.requestSession(); err != nil {
+		t.close(err)
+	}
 }
 
 // Disconnect sends a DISCONNECT_REQUEST. EventDisconnected follows when the server answers or
@@ -250,7 +300,7 @@ func (t *Tunnel) Send(now time.Time, msg cemi.Message) error {
 
 	t.pending = Encode(&TunnellingRequest{Channel: t.channel, Sequence: t.seqSend, Message: msg})
 	t.repeated = false
-	t.emit(Event{Kind: EventSend, Packet: t.pending, ToData: true})
+	t.out(t.pending, true)
 	t.setTimer(now, t.config.AckTimeout)
 
 	return nil
@@ -271,7 +321,7 @@ func (t *Tunnel) Tick(now time.Time) {
 		case TunnelConnected:
 			if t.pending != nil && !t.repeated {
 				t.repeated = true
-				t.emit(Event{Kind: EventSend, Packet: t.pending, ToData: true})
+				t.out(t.pending, true)
 				t.setTimer(now, t.config.AckTimeout)
 			} else if t.pending != nil {
 				t.fail(ErrAckTimeout)
@@ -298,6 +348,12 @@ func (t *Tunnel) HandlePacket(now time.Time, packet []byte) {
 	s, err := Decode(packet)
 	if err != nil {
 		return
+	}
+
+	if t.config.Secure != nil {
+		if s = t.unwrap(now, s); s == nil {
+			return
+		}
 	}
 
 	switch s := s.(type) {
@@ -395,6 +451,11 @@ func (t *Tunnel) fail(err error) {
 }
 
 func (t *Tunnel) close(err error) {
+	if t.key != nil {
+		t.send(&SessionStatus{Code: SessionClose}, false)
+		t.key = nil
+	}
+
 	t.state = TunnelClosed
 	t.pending = nil
 	t.timerSet = false
@@ -402,7 +463,136 @@ func (t *Tunnel) close(err error) {
 }
 
 func (t *Tunnel) send(s Service, toData bool) {
-	t.emit(Event{Kind: EventSend, Packet: Encode(s), ToData: toData})
+	t.out(Encode(s), toData)
+}
+
+// out sends a packet, in a SECURE_WRAPPER once there is a session key.
+func (t *Tunnel) out(packet []byte, toData bool) {
+	if t.key != nil {
+		packet = Wrap(t.key, t.session, secure.Nonce{Seq: t.seqSecure, Serial: t.config.Secure.Serial}, packet)
+		t.seqSecure++
+	}
+
+	t.emit(Event{Kind: EventSend, Packet: packet, ToData: toData})
+}
+
+// requestSession starts the secure session with a SESSION_REQUEST.
+func (t *Tunnel) requestSession() error {
+	random := t.config.Secure.Random
+	if random == nil {
+		random = rand.Reader
+	}
+
+	var b [32]byte
+	if _, err := io.ReadFull(random, b[:]); err != nil {
+		return err
+	}
+
+	private, err := ecdh.X25519().NewPrivateKey(b[:])
+	if err != nil {
+		return err
+	}
+
+	t.private = private
+	copy(t.public[:], private.PublicKey().Bytes())
+	t.send(&SessionRequest{PublicKey: t.public}, false)
+
+	return nil
+}
+
+// unwrap handles the packets of the secure session. It returns the packet in a SECURE_WRAPPER for
+// the tunnel, or nil. Plain packets other than SESSION_RESPONSE are ignored.
+func (t *Tunnel) unwrap(now time.Time, s Service) Service {
+	switch s := s.(type) {
+	case *SessionResponse:
+		if t.state == TunnelConnecting && t.key == nil {
+			t.sessionResponse(s)
+		}
+
+	case *SecureWrapper:
+		if t.key == nil || s.Session != t.session || s.Nonce.Seq < t.seqSecureRecv {
+			return nil
+		}
+
+		packet, err := s.Open(t.key)
+		if err != nil {
+			return nil
+		}
+
+		t.seqSecureRecv = s.Nonce.Seq + 1
+
+		inner, err := Decode(packet)
+		if err != nil {
+			return nil
+		}
+
+		if status, ok := inner.(*SessionStatus); ok {
+			t.sessionStatus(now, status.Code)
+			return nil
+		}
+
+		if t.authenticated {
+			return inner
+		}
+	}
+
+	return nil
+}
+
+// sessionResponse checks the server and authenticates the user.
+func (t *Tunnel) sessionResponse(r *SessionResponse) {
+	cfg := t.config.Secure
+
+	if r.Session == 0 {
+		t.close(ErrNoSession)
+		return
+	}
+
+	if cfg.DeviceAuth != [16]byte{} {
+		b, _ := aes.NewCipher(cfg.DeviceAuth[:])
+		mac := SessionResponseMAC(b, r.Session, &t.public, &r.PublicKey)
+
+		if subtle.ConstantTimeCompare(mac[:], r.MAC[:]) != 1 {
+			t.close(ErrDeviceAuth)
+			return
+		}
+	}
+
+	peer, err := ecdh.X25519().NewPublicKey(r.PublicKey[:])
+	if err != nil {
+		t.close(ErrDeviceAuth)
+		return
+	}
+
+	shared, err := t.private.ECDH(peer)
+	if err != nil {
+		t.close(ErrDeviceAuth)
+		return
+	}
+
+	key := secure.SessionKey(shared)
+	t.key, _ = aes.NewCipher(key[:])
+	t.session = r.Session
+
+	password, _ := aes.NewCipher(cfg.Password[:])
+	t.send(&SessionAuthenticate{User: cfg.User, MAC: SessionAuthenticateMAC(password, cfg.User, &t.public, &r.PublicKey)}, false)
+}
+
+// sessionStatus opens the tunnel once the user is authenticated, and closes it when the session
+// fails or ends.
+func (t *Tunnel) sessionStatus(now time.Time, code SessionCode) {
+	switch {
+	case code == SessionKeepAlive:
+
+	case code == SessionAuthenticated && t.state == TunnelConnecting && !t.authenticated:
+		t.authenticated = true
+		t.send(&ConnectRequest{Type: TunnelConnection, Layer: t.config.Layer}, false)
+		t.setTimer(now, t.config.ConnectTimeout)
+
+	case t.state != TunnelClosed:
+		t.key = nil // the session is gone, nothing more to send in it
+		t.close(code)
+	}
 }
 
 func (t *Tunnel) setTimer(now time.Time, d time.Duration) {

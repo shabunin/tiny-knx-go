@@ -20,7 +20,7 @@ var RoutingGroup = [4]byte{224, 0, 23, 12}
 // ServiceID identifies the service carried by a packet.
 type ServiceID uint16
 
-// These are the services of KNXnet/IP core, tunnelling and routing.
+// These are the services of KNXnet/IP core, tunnelling, routing and security.
 const (
 	SearchRequestID           ServiceID = 0x0201
 	SearchResponseID          ServiceID = 0x0202
@@ -41,6 +41,12 @@ const (
 	RoutingIndicationID       ServiceID = 0x0530
 	RoutingLostMessageID      ServiceID = 0x0531
 	RoutingBusyID             ServiceID = 0x0532
+	SecureWrapperID           ServiceID = 0x0950
+	SessionRequestID          ServiceID = 0x0951
+	SessionResponseID         ServiceID = 0x0952
+	SessionAuthenticateID     ServiceID = 0x0953
+	SessionStatusID           ServiceID = 0x0954
+	TimerNotifyID             ServiceID = 0x0955
 )
 
 func (id ServiceID) String() string {
@@ -137,6 +143,17 @@ func Decode(data []byte) (Service, error) {
 	case RoutingBusyID:
 		r.expectLength(6)
 		s = &RoutingBusy{DeviceState: r.byte(), WaitTime: r.uint16(), Control: r.uint16()}
+	case SecureWrapperID:
+		s = r.secureWrapper()
+	case SessionRequestID:
+		s = r.sessionRequest()
+	case SessionResponseID:
+		s = r.sessionResponse()
+	case SessionAuthenticateID:
+		s = r.sessionAuthenticate()
+	case SessionStatusID:
+		s = &SessionStatus{Code: SessionCode(r.byte())}
+		r.skip(1)
 	default:
 		s = &Unknown{ID: id, Body: append([]byte(nil), r.data...)}
 	}
@@ -294,6 +311,9 @@ type DeviceInfo struct {
 
 	// Families maps service families (e.g. 0x04 tunnelling, 0x05 routing) to their versions.
 	Families []ServiceFamily
+
+	// Secured lists the service families that need a secure session (KNX IP Secure).
+	Secured []ServiceFamily
 }
 
 // A ServiceFamily is a group of services supported by a server, with its version.
@@ -308,6 +328,7 @@ const (
 	FamilyDeviceManagement uint8 = 0x03
 	FamilyTunnelling       uint8 = 0x04
 	FamilyRouting          uint8 = 0x05
+	FamilySecurity         uint8 = 0x09
 )
 
 // Supports reports whether the server supports a service family.
@@ -324,6 +345,7 @@ func (d *DeviceInfo) Supports(family uint8) bool {
 const (
 	dibDeviceInfo = 0x01
 	dibFamilies   = 0x02
+	dibSecured    = 0x06
 )
 
 func (d *DeviceInfo) appendDIBs(b []byte) []byte {
@@ -338,8 +360,17 @@ func (d *DeviceInfo) appendDIBs(b []byte) []byte {
 	copy(name[:], d.Name)
 	b = append(b, name[:]...)
 
-	b = append(b, byte(2+2*len(d.Families)), dibFamilies)
-	for _, f := range d.Families {
+	b = appendFamilies(b, dibFamilies, d.Families)
+	if len(d.Secured) > 0 {
+		b = appendFamilies(b, dibSecured, d.Secured)
+	}
+
+	return b
+}
+
+func appendFamilies(b []byte, dib uint8, families []ServiceFamily) []byte {
+	b = append(b, byte(2+2*len(families)), dib)
+	for _, f := range families {
 		b = append(b, f.ID, f.Version)
 	}
 
@@ -737,13 +768,23 @@ func (r *reader) dibs() DeviceInfo {
 			d.Name = trimName(block[24:54])
 
 		case dibFamilies:
-			for i := 2; i+1 < length; i += 2 {
-				d.Families = append(d.Families, ServiceFamily{ID: block[i], Version: block[i+1]})
-			}
+			d.Families = families(block)
+
+		case dibSecured:
+			d.Secured = families(block)
 		}
 	}
 
 	return d
+}
+
+func families(block []byte) []ServiceFamily {
+	var f []ServiceFamily
+	for i := 2; i+1 < len(block); i += 2 {
+		f = append(f, ServiceFamily{ID: block[i], Version: block[i+1]})
+	}
+
+	return f
 }
 
 func trimName(b []byte) string {
