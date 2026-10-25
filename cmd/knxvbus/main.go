@@ -16,6 +16,9 @@
 // connected through a tunnel to another KNXnet/IP interface, such as a knxvbus -serial on a
 // Raspberry Pi in another network, and the tunnel here gets the address of that tunnel.
 //
+// With -serial and -module-device, the module itself is hosted as device 1: in programming mode
+// ("p 1") ETS can assign it a new individual address through another interface on the line.
+//
 // ETS devices implement the "Temperatursensor TP" of thelsing's knx-demo-tp.knxprod (manufacturer
 // 0x00FA, application 0xABCE version 0x79). Their downloaded configuration is kept in -data.
 //
@@ -81,6 +84,7 @@ func main() {
 	serialPort := flag.String("serial", "", "connect the line to a real one through the BAOS module or EMI2 interface on this serial port")
 	baud := flag.Int("baud", 19200, "baud rate of -serial")
 	uplinkTunnel := flag.String("tunnel", "", "connect the line to a real one through a tunnel to this KNXnet/IP interface (host[:port])")
+	moduleDevice := flag.Bool("module-device", false, "with -serial, host the module as device 1, so that ETS can assign its address")
 	flag.Parse()
 
 	if *xmlDir != "" {
@@ -119,7 +123,10 @@ func main() {
 
 	bus := mock.NewBus()
 
-	var realLine uplink
+	var (
+		realLine uplink
+		module   *ft12.Link
+	)
 
 	switch {
 	case *serialPort != "" && *uplinkTunnel != "":
@@ -127,7 +134,8 @@ func main() {
 		log.Fatal("Use either -serial or -tunnel")
 
 	case *serialPort != "":
-		realLine = openModule(*serialPort, *baud)
+		module = openModule(*serialPort, *baud)
+		realLine = module
 
 	case *uplinkTunnel != "":
 		realLine = openUplinkTunnel(*uplinkTunnel)
@@ -150,6 +158,14 @@ func main() {
 	}
 
 	var hosted []*hostedDevice
+
+	if *moduleDevice {
+		if module == nil {
+			log.Fatal("-module-device needs -serial")
+		}
+
+		hosted = append(hosted, startModuleDevice(bus, module, tunnelAddrs))
+	}
 
 	for _, s := range strings.Split(*devices, ",") {
 		if s = strings.TrimSpace(s); s != "" {
@@ -289,6 +305,81 @@ func bridge(bus *mock.Bus, realLine uplink) {
 			}
 		}
 	}()
+}
+
+// startModuleDevice hosts a device for the serial module as device 1, with the module's mask
+// version and serial number. When ETS assigns it a new address, the module gets it too, so that it
+// acknowledges the frames to it.
+func startModuleDevice(bus *mock.Bus, module *ft12.Link, tunnels []cemi.IndividualAddr) *hostedDevice {
+	identity := device.Identity{MaskVersion: 0x0701} // EMI2 modules are BCU2
+
+	mask, err := module.ReadProperty(cemi.ObjectTypeDevice, 1, cemi.PIDDeviceDescriptor, 1, 1)
+	if err == nil && len(mask) == 2 {
+		identity.MaskVersion = uint16(mask[0])<<8 | uint16(mask[1])
+	}
+
+	if serial, err := module.ReadProperty(cemi.ObjectTypeDevice, 1, pidSerialNumber, 1, 1); err == nil {
+		copy(identity.SerialNumber[:], serial)
+	}
+
+	d, err := device.New(identity, device.Config{Address: module.Address()})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	d.OnAddressChange(func(addr cemi.IndividualAddr) {
+		if err := module.SetAddress(addr); err != nil {
+			log.Printf("Device 1: setting the address of the module to %v: %v", addr, err)
+			return
+		}
+
+		log.Printf("Device 1: address %v, the module has it too", addr)
+	})
+	d.OnProgModeChange(func(on bool) { log.Printf("Device 1: programming mode %v", on) })
+
+	l := &moduleLink{Link: bus.Attach(module.Address()), inbound: make(chan *cemi.LDataInd, 64)}
+	for _, t := range tunnels {
+		if t == module.Address() {
+			l.tunnel = t
+		}
+	}
+
+	go l.filter()
+
+	go func() {
+		if err := d.Run(l); err != nil {
+			log.Printf("Device 1: %v", err)
+		}
+	}()
+
+	return &hostedDevice{d: d, kind: fmt.Sprintf("%v module %04X", module.Protocol(), identity.MaskVersion)}
+}
+
+// The serial number property of the device object.
+const pidSerialNumber = 11
+
+// moduleLink attaches the module device to the bus. While the device has the address of a tunnel,
+// it only receives broadcasts: its transport layer would otherwise answer the frames of the
+// tunnel's connections, e.g. with T_Disconnect.
+type moduleLink struct {
+	*mock.Link
+	tunnel  cemi.IndividualAddr
+	inbound chan *cemi.LDataInd
+}
+
+func (l *moduleLink) filter() {
+	for ind := range l.Link.Inbound() {
+		broadcast := ind.Control2.IsGroupAddr() && ind.Destination == 0
+		if broadcast || l.Address() != l.tunnel {
+			l.inbound <- ind
+		}
+	}
+
+	close(l.inbound)
+}
+
+func (l *moduleLink) Inbound() <-chan *cemi.LDataInd {
+	return l.inbound
 }
 
 func parseAddress(s string) cemi.IndividualAddr {

@@ -103,6 +103,11 @@ on one machine with different `-port`s; ETS finds them all.
 ```sh
 knxvbus -iface wlan0 -port 3672 -tunnel 192.168.1.112 -devices '' -name "real bus via the Pi"
 ```
+
+`-module-device` hosts the module itself as device 1 with its mask version and serial number, so
+that ETS can assign it an address through another interface on the line: `p 1` switches its
+programming mode, and the new address is written to the module.
+
 `-trace` prints every KNXnet/IP packet. `-iface` must be the interface on the network of the ETS
 computer: the server answers connections only on its address there.
 
