@@ -36,6 +36,8 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -47,6 +49,7 @@ import (
 	"github.com/shabunin/tiny-knx-go/cemi"
 	"github.com/shabunin/tiny-knx-go/device"
 	"github.com/shabunin/tiny-knx-go/internal/gateway"
+	"github.com/shabunin/tiny-knx-go/internal/sdk"
 	"github.com/shabunin/tiny-knx-go/knxnet"
 	"github.com/shabunin/tiny-knx-go/link"
 	"github.com/shabunin/tiny-knx-go/link/ft12"
@@ -90,6 +93,8 @@ BAOS mode input:
 BAOS mode outputs:
   baos:[IFACE][?port=12004]         ObjectServer over TCP, like an IP BAOS
   baos:/PATH                        ObjectServer over a unix socket, the same frames
+  json:/PATH[?names=FILE]           the datapoints as JSON on a unix socket, like dobaos (baosctl);
+                                    FILE names datapoints: {"room_temperature": 1, ...}
   monitor                           print the datapoint value indications
 
 Auto mode input:
@@ -97,7 +102,7 @@ Auto mode input:
                                     BAOS module in ObjectServer mode, switched to data link
                                     layer mode while a tunnel is open and for idle after
 
-Auto mode outputs: knxip (at least one), baos and monitor as above. While ETS has a tunnel, the
+Auto mode outputs: knxip (at least one), baos, json and monitor as above. While ETS has a tunnel, the
 ObjectServer is gone and its clients are turned away.
 
 Options:
@@ -435,6 +440,9 @@ func runBAOS(input *gateway.Spec, outputs specs) {
 		case "baos":
 			serveBAOS(out, hub)
 
+		case "json":
+			serveJSON(out, hub)
+
 		case "monitor":
 			check(out.Unused())
 			go printIndications(hub)
@@ -460,7 +468,43 @@ func serveBAOS(spec *gateway.Spec, hub *gateway.BAOSHub) {
 	gateway.CloseOnSignal(l) // removes a unix socket
 	log.Printf("Serving the ObjectServer at %v", l.Addr())
 
-	go func() { log.Fatal(gateway.ServeBAOS(l, hub)) }()
+	go serve(func() error { return gateway.ServeBAOS(l, hub) })
+}
+
+// serveJSON serves the datapoints of the hub as JSON on the unix socket of a json output.
+func serveJSON(spec *gateway.Spec, hub *gateway.BAOSHub) {
+	var names map[string]uint16
+
+	if file := spec.Get("names", ""); file != "" {
+		data, err := os.ReadFile(file)
+		check(err)
+
+		if err := json.Unmarshal(data, &names); err != nil {
+			log.Fatalf("%s: %v", file, err)
+		}
+	}
+
+	check(spec.Unused())
+
+	if !strings.Contains(spec.Target, "/") {
+		log.Fatalf("%s: the target is the path of a unix socket", spec)
+	}
+
+	l, err := gateway.ListenBAOS(spec.Target, 0)
+	check(err)
+
+	gateway.CloseOnSignal(l)
+	log.Printf("Serving the datapoints as JSON at %v", l.Addr())
+
+	go serve(func() error { return sdk.NewServer(hub, names).Serve(l) })
+}
+
+// serve runs a server until its listener fails. A listener that closes at exit, before the module
+// does, is no error: exiting then would skip the module, e.g. leave it in data link layer mode.
+func serve(run func() error) {
+	if err := run(); !errors.Is(err, net.ErrClosed) {
+		log.Fatal(err)
+	}
 }
 
 // printIndications prints the datapoint values and server items that the ObjectServer indicates.

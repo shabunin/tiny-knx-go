@@ -64,6 +64,9 @@ func runAuto(input *gateway.Spec, outputs specs, trace bool) {
 		case "baos":
 			serveBAOS(out, a.Hub)
 
+		case "json":
+			serveJSON(out, a.Hub)
+
 		case "monitor":
 			check(out.Unused())
 

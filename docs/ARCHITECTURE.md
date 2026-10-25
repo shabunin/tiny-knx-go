@@ -117,7 +117,8 @@ object table is ignored.
     a module in ObjectServer mode and switches it to data link layer mode while a tunnel is open,
     like an IP BAOS; the ObjectServer is also served on a unix socket. Tested with the kBerry and
     the Serial BAOS 870: tunnel sessions of knxmon, then the ObjectServer back after the idle time,
-    and the modules did not restart. Next: the ObjectServer in KNXnet/IP search
+    and the modules did not restart. `internal/sdk` serves the datapoints as JSON with the API of
+    dobaos (`-o json:`, `cmd/baosctl`). Next: the ObjectServer in KNXnet/IP search
     responses (manufacturer DIB 0xFE, 00C5, F0 20) and over UDP (connection type 0xF0).
 
 ## Hardware notes
