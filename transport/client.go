@@ -212,6 +212,21 @@ func (c *Client) DescribeProperty(object, propertyID, index uint8) (apdu.Propert
 	return response.(apdu.PropertyDescriptionResponse), nil
 }
 
+// Authorize authenticates the connection with a key and returns the access level the device grants,
+// 0 being the highest. Devices protect parts of their memory with access levels; the default key is
+// 0xFFFFFFFF.
+func (c *Client) Authorize(key uint32) (uint8, error) {
+	response, err := c.Request(apdu.AuthorizeRequest{Key: key}, func(a apdu.APDU) bool {
+		_, ok := a.(apdu.AuthorizeResponse)
+		return ok
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	return response.(apdu.AuthorizeResponse).Level, nil
+}
+
 // ReadMemory reads count bytes (at most 63) of device memory.
 func (c *Client) ReadMemory(address uint16, count uint8) ([]byte, error) {
 	response, err := c.Request(apdu.MemoryRead{Count: count, Address: address}, func(a apdu.APDU) bool {

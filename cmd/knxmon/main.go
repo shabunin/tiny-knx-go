@@ -26,6 +26,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -66,6 +67,8 @@ func main() {
 	read := flag.String("read", "", "send a group read to GA, e.g. 1/1/1")
 	info := flag.String("info", "", "read the identity of the device at this individual address")
 	progMode := flag.Bool("progmode", false, "list the devices in programming mode, until interrupted")
+	memory := flag.String("memory", "", "dump memory of a device: IA:ADDRESS:COUNT in hex, e.g. 1.1.3:4000:40")
+	key := flag.String("key", "", "authorize with this key (hex, e.g. ffffffff) before -memory")
 	address := flag.String("address", "", "set our individual address (BAOS module, TP-UART, routing)")
 	user := flag.Int("user", 2, "user ID for a secure tunnel, with -password")
 	password := flag.String("password", "", "open the tunnel in a KNX IP Secure session with this user password")
@@ -209,6 +212,11 @@ func main() {
 		return
 	}
 
+	if *memory != "" {
+		dumpMemory(l, *memory, *key)
+		return
+	}
+
 	if *props != "" {
 		printProperties(l, *props)
 		return
@@ -262,6 +270,68 @@ func openBAOS(path string, baud int, ia cemi.IndividualAddr) *ft12.Link {
 	}
 
 	return l
+}
+
+// dumpMemory prints memory of a device as hex lines, read in chunks that fit a standard frame.
+func dumpMemory(l link.Link, spec, key string) {
+	parts := strings.Split(spec, ":")
+	if len(parts) != 3 {
+		log.Fatal("-memory expects IA:ADDRESS:COUNT")
+	}
+
+	ia, err := cemi.NewIndividualAddrString(parts[0])
+	if err != nil {
+		log.Fatalf("Bad individual address %q: %v", parts[0], err)
+	}
+
+	address, err1 := strconv.ParseUint(parts[1], 16, 16)
+	count, err2 := strconv.ParseUint(parts[2], 16, 16)
+
+	if err1 != nil || err2 != nil {
+		log.Fatal("-memory expects hex ADDRESS and COUNT")
+	}
+
+	client := transport.NewClient(l, transport.DefaultConfig)
+	defer client.Close()
+
+	if err := client.Connect(ia); err != nil {
+		log.Fatalf("Connecting to %s: %v", ia, err)
+	}
+	defer client.Disconnect()
+
+	if key != "" {
+		k, err := strconv.ParseUint(key, 16, 32)
+		if err != nil {
+			log.Fatalf("Bad key %q", key)
+		}
+
+		level, err := client.Authorize(uint32(k))
+		if err != nil {
+			log.Fatalf("Authorizing: %v", err)
+		}
+
+		log.Printf("Access level %d", level)
+	}
+
+	end := address + count
+
+	for line := address; line < end; line += 16 {
+		var data []byte
+
+		for at := line; at < line+16 && at < end; at += 12 {
+			n := min(12, line+16-at, end-at)
+
+			chunk, err := client.ReadMemory(uint16(at), uint8(n))
+			if err != nil {
+				fmt.Printf("%04x  (%v)\n", at, err)
+				return
+			}
+
+			data = append(data, chunk...)
+		}
+
+		fmt.Printf("%04x  % x\n", line, data)
+	}
 }
 
 // listProgMode asks for the devices in programming mode every few seconds, with a broadcast

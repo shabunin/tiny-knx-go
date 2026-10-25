@@ -73,6 +73,13 @@ func (d *simulatedDevice) respond(request apdu.APDU) apdu.APDU {
 		}
 
 		return apdu.MemoryResponse{Address: req.Address, Data: data}
+
+	case apdu.AuthorizeRequest:
+		if req.Key == 0xFFFFFFFF {
+			return apdu.AuthorizeResponse{Level: 2}
+		}
+
+		return apdu.AuthorizeResponse{Level: 15}
 	}
 
 	return nil
@@ -173,6 +180,10 @@ func TestClientRequests(t *testing.T) {
 
 	if _, err := client.ReadProperty(0, 200, 1, 1); !errors.Is(err, ErrRejected) {
 		t.Errorf("Unknown property: got %v, expected %v", err, ErrRejected)
+	}
+
+	if level, err := client.Authorize(0xFFFFFFFF); err != nil || level != 2 {
+		t.Errorf("Authorize = %d, %v; expected level 2", level, err)
 	}
 
 	if data, err := client.ReadMemory(0x0060, 4); err != nil || !bytes.Equal(data, []byte{0x60, 0x61, 0x62, 0x63}) {
