@@ -17,6 +17,7 @@ const (
 	PIDDeviceDescriptor uint8 = 83 // in the device object
 	PIDSerialNumber     uint8 = 11 // in the device object
 	PIDCommMode         uint8 = 52 // in the cEMI server object
+	PIDProgMode         uint8 = 54 // in the device object, bit 0
 
 	CommModeDataLinkLayer  uint8 = 0x00
 	CommModeBusmonitor     uint8 = 0x01

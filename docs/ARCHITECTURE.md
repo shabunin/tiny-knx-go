@@ -124,7 +124,13 @@ object table is ignored.
   usually 0xF0, the BAOS (ObjectServer) mode; the Weinzierl SDK names the modes Link 0x00,
   Busmonitor 0x01, Raw 0x02, 0x06, 0xF0 and None 0xFF. In link layer mode the module's own stack
   does not answer on the bus (no DeviceDescriptorResponse to ETS) and it ignores ObjectServer
-  requests; in BAOS mode it answers ETS as a device (mask 07B0, order number "838").
+  requests; in BAOS mode it answers ETS as a device (mask 07B0, order number "838"). From the
+  serial side, its stack does answer in link layer mode: an L_Data.req to its own address (source
+  0.0.0, which it fills in) comes back as L_Data.ind with source and destination both its address,
+  e.g. `11 00 b0 60 0000 1401 01 43 00` (DeviceDescriptorRead) → `29 00 b0 60 1401 1401 03 43 40 07
+  b0`, and broadcasts it sends are answered too (IndividualAddressResponse in programming mode,
+  PID_PROG_MODE 54). That is how ETS programs a kBerry through a tunnel on that kBerry (as
+  dobaosll's llnet did). The BAOS 820 over EMI2 does not: T_Connect to itself is not confirmed.
 - BAOS Module 820 (RS-232, BCU2 mask 0701): EMI2 for link layer mode, ObjectServer protocol 1.x in
   normal mode on the same FT1.2 line; each version ignores requests of the other, which is how
   `baos.NewClient` detects it. It has 250 datapoints and a 240-byte buffer, and reports the first ID

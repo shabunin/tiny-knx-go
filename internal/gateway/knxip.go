@@ -101,3 +101,14 @@ func InterfaceSerial(manufacturer uint16, port int) [6]byte {
 
 	return [6]byte{byte(manufacturer >> 8), byte(manufacturer), 0xff, 0xff, byte(port >> 8), byte(port)}
 }
+
+// HostSerial returns the serial number of a KNXnet/IP interface on a network interface: the end
+// of its MAC address tells interfaces on different hosts apart, the port those on one host.
+func HostSerial(manufacturer uint16, mac net.HardwareAddr, port int) [6]byte {
+	serial := InterfaceSerial(manufacturer, port)
+	if len(mac) >= 2 {
+		copy(serial[2:4], mac[len(mac)-2:])
+	}
+
+	return serial
+}

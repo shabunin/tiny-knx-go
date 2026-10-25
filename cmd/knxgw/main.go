@@ -7,7 +7,7 @@
 // which the outputs serve:
 //
 //	knxgw -i ft12:/dev/ttyAMA0 -o knxip:wlan0                  # kBerry as a KNXnet/IP interface
-//	knxgw -i 'ft12:/dev/ttyAMA0?device' -o knxip:wlan0 -o monitor
+//	knxgw -i ft12:/dev/ttyUSB0?device -o knxip:eth0 -o monitor   # EMI2 module hosted as a device
 //	knxgw -i tpuart:/dev/ttyUSB0?address=1.1.250 -o knxip:eth0 -o routing:eth0
 //	knxgw -i tunnel:192.168.1.112 -o knxip:wlan0?port=3672      # repeat an interface elsewhere
 //	knxgw -i routing:eth0 -o knxip:eth0?tunnels=1.1.250,1.1.251 # a tunnelling server for a router
@@ -21,8 +21,12 @@
 // A module is in one mode at a time: ft12 switches it to data link layer mode, baos to
 // ObjectServer mode. ft12 restores the previous mode when knxgw ends.
 //
-// With ft12:PORT?device, the module itself is hosted as device 1. In programming mode (type "p" on
-// standard input) ETS can assign it a new individual address through another interface.
+// A cEMI module (kBerry) answers frames to its own address from the serial side with its own device
+// stack, also in data link layer mode. The tunnel has the module's address, so ETS reaches the
+// module through it like any device: "p" on standard input switches its programming mode, and ETS
+// can assign its address and download its BAOS application. An EMI2 module does not answer that
+// way; with ft12:PORT?device, a device with its mask and serial number is hosted for it instead, so
+// that ETS can assign its address through another interface.
 package main
 
 import (
@@ -40,6 +44,7 @@ import (
 	"github.com/shabunin/tiny-knx-go/internal/gateway"
 	"github.com/shabunin/tiny-knx-go/knxnet"
 	"github.com/shabunin/tiny-knx-go/link"
+	"github.com/shabunin/tiny-knx-go/link/ft12"
 	"github.com/shabunin/tiny-knx-go/link/knxip"
 	"github.com/shabunin/tiny-knx-go/link/mock"
 )
@@ -190,7 +195,7 @@ func runLink(inputs, outputs specs, trace bool) {
 	}
 
 	var (
-		devices []*device.Device
+		devices []progDevice
 		alias   = lineAddr // the interface address of the first server
 		tunnels = defaultTunnels
 	)
@@ -203,17 +208,30 @@ func runLink(inputs, outputs specs, trace bool) {
 	}
 
 	for _, l := range lines {
-		if l.Module == nil || !l.Spec.Has("device") {
+		switch {
+		case l.Module == nil:
 			continue
-		}
 
-		d, kind, err := gateway.StartModuleDevice(bus, len(devices)+1, l.Module, tunnels, alias)
-		if err != nil {
-			log.Fatal(err)
-		}
+		case l.Spec.Has("device"):
+			if l.Module.Protocol() == ft12.ProtocolCEMI {
+				log.Printf("%s: the device hides the module, which answers for itself through the tunnel of its address", l.Spec)
+			}
 
-		log.Printf("Device %d: %v %s; \"p %d\" switches its programming mode", len(devices)+1, d.Address(), kind, len(devices)+1)
-		devices = append(devices, d)
+			d, kind, err := gateway.StartModuleDevice(bus, len(devices)+1, l.Module, tunnels, alias)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			devices = append(devices, hostedDevice{d})
+			log.Printf("Device %d: %v %s; \"p %d\" switches its programming mode", len(devices), d.Address(), kind, len(devices))
+
+		case l.Module.Protocol() == ft12.ProtocolCEMI:
+			// A cEMI module answers frames to its own address from the serial side with its own
+			// stack, in data link layer mode too, so ETS reaches it through the tunnel of that
+			// address: it can assign the module's address and download its application.
+			devices = append(devices, moduleDevice{l.Module})
+			log.Printf("Device %d: the module at %v; \"p %d\" switches its programming mode", len(devices), l.Module.Address(), len(devices))
+		}
 	}
 
 	commands(devices)
@@ -252,6 +270,7 @@ func serveKNXIP(bus *mock.Bus, spec *gateway.Spec, lineAddr cemi.IndividualAddr,
 
 	if ifi != nil {
 		copy(info.MAC[:], ifi.HardwareAddr)
+		info.SerialNumber = gateway.HostSerial(manufacturer, ifi.HardwareAddr, port)
 	}
 
 	config := knxip.TunnelServerConfig{
@@ -285,8 +304,51 @@ func serveKNXIP(bus *mock.Bus, spec *gateway.Spec, lineAddr cemi.IndividualAddr,
 	return address, tunnels
 }
 
-// commands reads commands for the hosted devices from standard input.
-func commands(devices []*device.Device) {
+// A progDevice is a device whose programming mode can be switched from standard input.
+type progDevice interface {
+	Address() cemi.IndividualAddr
+	ProgMode() (bool, error)
+	SetProgMode(on bool) error
+}
+
+// hostedDevice is a device on the virtual line.
+type hostedDevice struct{ d *device.Device }
+
+func (h hostedDevice) Address() cemi.IndividualAddr { return h.d.Address() }
+
+func (h hostedDevice) ProgMode() (bool, error) { return h.d.ProgMode(), nil }
+
+func (h hostedDevice) SetProgMode(on bool) error {
+	h.d.SetProgMode(on)
+	return nil
+}
+
+// moduleDevice is the device stack of a cEMI module, whose programming mode is a property of its
+// device object.
+type moduleDevice struct{ m *ft12.Link }
+
+func (m moduleDevice) Address() cemi.IndividualAddr { return m.m.Address() }
+
+func (m moduleDevice) ProgMode() (bool, error) {
+	data, err := m.m.ReadProperty(cemi.ObjectTypeDevice, 1, cemi.PIDProgMode, 1, 1)
+	if err != nil || len(data) != 1 {
+		return false, fmt.Errorf("reading the programming mode: %v", err)
+	}
+
+	return data[0]&1 != 0, nil
+}
+
+func (m moduleDevice) SetProgMode(on bool) error {
+	value := byte(0)
+	if on {
+		value = 1
+	}
+
+	return m.m.WriteProperty(cemi.ObjectTypeDevice, 1, cemi.PIDProgMode, 1, []byte{value})
+}
+
+// commands reads commands for the devices from standard input.
+func commands(devices []progDevice) {
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for scanner.Scan() {
@@ -305,16 +367,33 @@ func commands(devices []*device.Device) {
 
 			d := devices[n-1]
 
-			on := !d.ProgMode()
+			on, err := d.ProgMode()
+			if err != nil {
+				log.Printf("Device %d: %v", n, err)
+				continue
+			}
+
+			on = !on
 			if fields[2] != "" {
 				on = fields[2] == "on"
 			}
 
-			d.SetProgMode(on)
+			if err := d.SetProgMode(on); err != nil {
+				log.Printf("Device %d: setting the programming mode: %v", n, err)
+				continue
+			}
+
+			log.Printf("Device %d: programming mode %v", n, on)
 
 		case "l":
 			for i, d := range devices {
-				fmt.Printf("  device %d: %v, programming mode %v\n", i+1, d.Address(), d.ProgMode())
+				on, err := d.ProgMode()
+				if err != nil {
+					fmt.Printf("  device %d: %v, %v\n", i+1, d.Address(), err)
+					continue
+				}
+
+				fmt.Printf("  device %d: %v, programming mode %v\n", i+1, d.Address(), on)
 			}
 
 		default:

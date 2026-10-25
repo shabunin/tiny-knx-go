@@ -38,8 +38,9 @@ type Line struct {
 }
 
 // LineMedia describes the media that OpenLine takes.
-const LineMedia = `  ft12:PORT[?baud=19200&device]     BAOS module (cEMI, kBerry) or EMI2 interface; device hosts
-                                    the module as a device, so that ETS can assign its address
+const LineMedia = `  ft12:PORT[?baud=19200&device]     BAOS module (cEMI, kBerry) or EMI2 interface; ETS reaches a
+                                    cEMI module itself through the tunnel; device hosts an EMI2
+                                    module as a device, so that ETS can assign its address
   tpuart:PORT[?baud=19200&chip=ncn5120|tpuart2&address=15.15.255]
                                     TP-UART or NCN5120 transceiver
   tunnel:HOST[:PORT][?user=2&password=&auth=]

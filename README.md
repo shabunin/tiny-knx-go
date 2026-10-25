@@ -91,7 +91,7 @@ streams. In link mode the inputs pass telegrams, are bridged to each other and s
 
 ```sh
 knxgw -i ft12:/dev/ttyAMA0 -o knxip:wlan0                   # kBerry as a KNXnet/IP interface
-knxgw -i 'ft12:/dev/ttyAMA0?device' -o knxip:wlan0 -o monitor # host the module too (p 1 in ETS)
+knxgw -i ft12:/dev/ttyUSB0?device -o knxip:eth0 -o monitor  # an EMI2 module, hosted as a device
 knxgw -i 'tpuart:/dev/ttyUSB0?address=1.1.250' -o knxip:eth0 -o routing:eth0
 knxgw -i tunnel:192.168.1.112 -o 'knxip:wlan0?port=3672&name=via the Pi'
 knxgw -i routing:eth0 -o 'knxip:eth0?tunnels=1.1.250,1.1.251'  # tunnelling for a KNX IP router
@@ -104,6 +104,12 @@ In BAOS mode the input is the ObjectServer of a BAOS module, and `-o baos` serve
 knxgw -i baos:/dev/ttyAMA0 -o baos:wlan0 -o monitor   # on the Pi
 knxgw -i baos:tcp://192.168.2.29 -o monitor           # anywhere else
 ```
+
+ETS reaches a kBerry itself through the tunnel of its address: the module answers frames to its
+own address from the serial side, in data link layer mode too. So ETS can assign its address and
+download its BAOS application through the gateway on that very module; `p` on standard input
+switches its programming mode (PID_PROG_MODE of its device object). An EMI2 module (BAOS 820) does
+not answer that way, and `?device` hosts a device with its mask and serial number for it instead.
 
 `knxgw -h` lists all media and their options. Inputs must reach different lines, or frames loop;
 routing ignores the echo of its own multicast, so it can be both an input and an output.
