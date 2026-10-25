@@ -151,7 +151,8 @@ broadcasts `datapoint value` (from the bus, and after `set value`/`put value`) a
 
 `baosctl` is a REPL for it, a Go port of dobaos.tool with its commands and output: `watch 1: red`
 colors a datapoint's values (or hides them), `name 8: temperature` names one (kept in the names
-file). With arguments it runs one command, e.g. `baosctl get 1 2`; `rlwrap baosctl` adds history.
+file). It has history (up, down, kept in `~/.config/baosctl/history`), line editing and completion
+of commands (tab). With arguments it runs one command, e.g. `baosctl get 1 2`.
 
 ```text
 $ baosctl -s /run/knxgw.json

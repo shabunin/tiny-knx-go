@@ -11,8 +11,8 @@
 //	baos> set [2: 21.5, lights: false]
 //	baos> watch 2: red
 //
-// With arguments it runs them as one command and exits: baosctl get 1 2. For history and line
-// editing, run it under rlwrap.
+// With arguments it runs them as one command and exits: baosctl get 1 2. In a terminal it has
+// history (kept in ~/.config/baosctl/history), arrow keys and completion of commands (tab).
 package main
 
 import (
@@ -23,6 +23,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -136,21 +137,28 @@ func saveConfig() {
 
 const prompt = "baos> "
 
+var commands = []string{
+	"description", "get", "stored", "read", "set", "put", "raw", "serveritems", "progmode",
+	"name", "unname", "watch", "unwatch", "reset", "version", "help", "exit",
+}
+
 var (
 	outMu    sync.Mutex
 	terminal bool
+	editor   *lineEditor
 )
 
-// out prints a line above the prompt.
+// out prints a line, in the REPL above the line being edited.
 func out(line string) {
+	if editor != nil {
+		editor.Print(line)
+		return
+	}
+
 	outMu.Lock()
 	defer outMu.Unlock()
 
-	if terminal {
-		fmt.Print("\r\033[K" + line + "\n" + prompt)
-	} else {
-		fmt.Println(line)
-	}
+	fmt.Println(line)
 }
 
 func repl(socket string) {
@@ -158,6 +166,37 @@ func repl(socket string) {
 
 	info, _ := os.Stdin.Stat()
 	terminal = info != nil && info.Mode()&os.ModeCharDevice != 0
+
+	fmt.Println("hello, friend")
+	fmt.Println("connected to", socket)
+
+	// Without a terminal, e.g. with commands from a file, lines are read as they are.
+	read := func() (string, error) { return "", io.EOF }
+
+	if terminal {
+		history := ""
+		if configPath != "" {
+			history = filepath.Join(filepath.Dir(configPath), "history")
+		}
+
+		var err error
+		if editor, err = newLineEditor(prompt, commands, history); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		defer editor.Close()
+
+		read = editor.ReadLine
+	} else {
+		scanner := bufio.NewScanner(os.Stdin)
+		read = func() (string, error) {
+			if scanner.Scan() {
+				return scanner.Text(), nil
+			}
+
+			return "", io.EOF
+		}
+	}
 
 	go func() {
 		for m := range client.Broadcasts() {
@@ -168,21 +207,22 @@ func repl(socket string) {
 		case <-done:
 		default:
 			out("the connection to knxgw closed")
+
+			if editor != nil {
+				editor.Close()
+			}
+
 			os.Exit(1)
 		}
 	}()
 
-	fmt.Println("hello, friend")
-	fmt.Println("connected to", socket)
+	for {
+		line, err := read()
+		if err != nil {
+			break
+		}
 
-	if terminal {
-		fmt.Print(prompt)
-	}
-
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
+		line = strings.TrimSpace(line)
 		if line == "exit" || line == "quit" {
 			break
 		}
@@ -191,12 +231,6 @@ func repl(socket string) {
 			if err := execute(line); err != nil {
 				out(err.Error())
 			}
-		}
-
-		if terminal {
-			outMu.Lock()
-			fmt.Print(prompt)
-			outMu.Unlock()
 		}
 	}
 
