@@ -413,6 +413,40 @@ func (l *Link) ReadAddress() (cemi.IndividualAddr, error) {
 	return addr, nil
 }
 
+// SerialNumber reads the serial number from the module's device object, or with PEI_Identify from
+// an EMI2 module.
+func (l *Link) SerialNumber() ([6]byte, error) {
+	var serial [6]byte
+
+	if l.Protocol() == ProtocolEMI2 {
+		ident, err := l.identify(l.config.ConfirmTimeout)
+		if err != nil {
+			return serial, err
+		}
+
+		if len(ident) < 9 {
+			return serial, ErrPropertyFailed
+		}
+
+		copy(serial[:], ident[3:])
+
+		return serial, nil
+	}
+
+	data, err := l.ReadProperty(cemi.ObjectTypeDevice, 1, cemi.PIDSerialNumber, 1, 1)
+	if err != nil {
+		return serial, err
+	}
+
+	if len(data) != len(serial) {
+		return serial, ErrPropertyFailed
+	}
+
+	copy(serial[:], data)
+
+	return serial, nil
+}
+
 // Inbound returns the frames received from the bus.
 func (l *Link) Inbound() <-chan *cemi.LDataInd {
 	return l.inbound

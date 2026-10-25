@@ -106,7 +106,12 @@ knxvbus -iface wlan0 -port 3672 -tunnel 192.168.1.112 -devices '' -name "real bu
 
 `-module-device` hosts the module itself as device 1 with its mask version and serial number, so
 that ETS can assign it an address through another interface on the line: `p 1` switches its
-programming mode, and the new address is written to the module.
+programming mode, and the new address is written to the module. EMI2 modules that refuse the
+memory write get their address over the bus instead, by serial number:
+
+```sh
+knxmon -tunnel 192.168.1.112 -serial-address 00c501004122:1.4.2
+```
 
 `-trace` prints every KNXnet/IP packet. `-iface` must be the interface on the network of the ETS
 computer: the server answers connections only on its address there.

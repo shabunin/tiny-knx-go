@@ -16,6 +16,7 @@
 //	knxmon -search                               # find KNXnet/IP interfaces and routers
 //	knxmon -port /dev/serial0 -scan 1.1          # list the devices of line 1.1
 //	knxmon -port /dev/serial0 -props 1.1.3       # read all properties of a device
+//	knxmon -port /dev/serial0 -serial-address 00c501004122:1.4.2  # set an address by serial number
 package main
 
 import (
@@ -31,6 +32,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shabunin/tiny-knx-go/apdu"
 	"github.com/shabunin/tiny-knx-go/cemi"
 	"github.com/shabunin/tiny-knx-go/internal/pretty"
 	"github.com/shabunin/tiny-knx-go/knxnet"
@@ -69,6 +71,7 @@ func main() {
 	progMode := flag.Bool("progmode", false, "list the devices in programming mode, until interrupted")
 	memory := flag.String("memory", "", "dump memory of a device: IA:ADDRESS:COUNT in hex, e.g. 1.1.3:4000:40")
 	key := flag.String("key", "", "authorize with this key (hex, e.g. ffffffff) before -memory")
+	serialAddress := flag.String("serial-address", "", "assign an address by serial number, without programming mode: SERIAL:IA, e.g. 00c501004122:1.4.2")
 	address := flag.String("address", "", "set our individual address (BAOS module, TP-UART, routing)")
 	user := flag.Int("user", 2, "user ID for a secure tunnel, with -password")
 	password := flag.String("password", "", "open the tunnel in a KNX IP Secure session with this user password")
@@ -222,6 +225,11 @@ func main() {
 		return
 	}
 
+	if *serialAddress != "" {
+		writeAddressBySerial(l, *serialAddress)
+		return
+	}
+
 	for ind := range l.Inbound() {
 		fmt.Println(time.Now().Format("15:04:05.000"), pretty.Frame(&ind.LData))
 	}
@@ -372,6 +380,65 @@ func listProgMode(l busLink) {
 			case <-ticker.C:
 				break wait
 			}
+		}
+	}
+}
+
+// writeAddressBySerial assigns an individual address to the device with a serial number, with
+// IndividualAddressSerialNumber_Write, and reads it back.
+func writeAddressBySerial(l link.Link, arg string) {
+	serialHex, iaText, _ := strings.Cut(arg, ":")
+
+	b, err := hex.DecodeString(strings.ReplaceAll(serialHex, " ", ""))
+	if err != nil || len(b) != 6 {
+		log.Fatalf("Bad serial number %q: 6 bytes in hex", serialHex)
+	}
+
+	var serial apdu.SerialNumber
+	copy(serial[:], b)
+
+	ia, err := cemi.NewIndividualAddrString(iaText)
+	if err != nil {
+		log.Fatalf("Bad individual address %q: %v", iaText, err)
+	}
+
+	broadcast := func(a apdu.APDU) {
+		err := l.Send(&cemi.LDataReq{LData: cemi.LData{
+			Control1: cemi.Control1Request(cemi.PrioSystem),
+			Control2: cemi.Control2GroupAddr | cemi.Control2Hops(6),
+			Data:     apdu.Encode(a),
+		}})
+		if err != nil {
+			log.Fatalf("Sending %T: %v", a, err)
+		}
+	}
+
+	broadcast(apdu.IndividualAddressSerialNumberWrite{SerialNumber: serial, Address: ia})
+	broadcast(apdu.IndividualAddressSerialNumberRead{SerialNumber: serial})
+
+	timeout := time.After(3 * time.Second)
+
+	for {
+		select {
+		case ind, open := <-l.Inbound():
+			if !open {
+				return
+			}
+
+			app, ok := ind.Data.(*cemi.AppData)
+			if !ok {
+				continue
+			}
+
+			if r, err := apdu.Decode(app); err == nil {
+				if r, ok := r.(apdu.IndividualAddressSerialNumberResponse); ok && r.SerialNumber == serial {
+					fmt.Printf("%x is at %v\n", serial[:], ind.Source)
+					return
+				}
+			}
+
+		case <-timeout:
+			log.Fatalf("No device with serial number %x answered", serial[:])
 		}
 	}
 }

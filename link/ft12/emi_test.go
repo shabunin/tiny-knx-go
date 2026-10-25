@@ -131,6 +131,10 @@ func TestEMIDetect(t *testing.T) {
 			t.Errorf("%v: ReadAddress = %v, %v; Address %v", protocol, addr, err, l.Address())
 		}
 
+		if serial, err := l.SerialNumber(); err != nil || serial != [6]byte{0x00, 0xc5, 0x01, 0x00, 0x41, 0x22} {
+			t.Errorf("%v: SerialNumber = %x, %v", protocol, serial, err)
+		}
+
 		if _, err := l.ReadProperty(cemi.ObjectTypeDevice, 1, cemi.PIDDeviceDescriptor, 1, 1); err != ErrNotSupported {
 			t.Errorf("%v: ReadProperty: %v", protocol, err)
 		}

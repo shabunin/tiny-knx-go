@@ -318,8 +318,8 @@ func startModuleDevice(bus *mock.Bus, module *ft12.Link, tunnels []cemi.Individu
 		identity.MaskVersion = uint16(mask[0])<<8 | uint16(mask[1])
 	}
 
-	if serial, err := module.ReadProperty(cemi.ObjectTypeDevice, 1, pidSerialNumber, 1, 1); err == nil {
-		copy(identity.SerialNumber[:], serial)
+	if serial, err := module.SerialNumber(); err == nil {
+		identity.SerialNumber = serial
 	}
 
 	d, err := device.New(identity, device.Config{Address: module.Address()})
@@ -330,6 +330,7 @@ func startModuleDevice(bus *mock.Bus, module *ft12.Link, tunnels []cemi.Individu
 	d.OnAddressChange(func(addr cemi.IndividualAddr) {
 		if err := module.SetAddress(addr); err != nil {
 			log.Printf("Device 1: setting the address of the module to %v: %v", addr, err)
+			log.Printf("Device 1: assign it through another interface: knxmon -serial-address %x:%v", identity.SerialNumber[:], addr)
 			return
 		}
 
@@ -355,12 +356,10 @@ func startModuleDevice(bus *mock.Bus, module *ft12.Link, tunnels []cemi.Individu
 	return &hostedDevice{d: d, kind: fmt.Sprintf("%v module %04X", module.Protocol(), identity.MaskVersion)}
 }
 
-// The serial number property of the device object.
-const pidSerialNumber = 11
-
 // moduleLink attaches the module device to the bus. While the device has the address of a tunnel,
 // it only receives broadcasts: its transport layer would otherwise answer the frames of the
-// tunnel's connections, e.g. with T_Disconnect.
+// tunnel's connections, e.g. with T_Disconnect. Broadcasts from the tunnel, such as those of ETS
+// connected through this module, come without source, as the device ignores its own frames.
 type moduleLink struct {
 	*mock.Link
 	tunnel  cemi.IndividualAddr
@@ -370,7 +369,13 @@ type moduleLink struct {
 func (l *moduleLink) filter() {
 	for ind := range l.Link.Inbound() {
 		broadcast := ind.Control2.IsGroupAddr() && ind.Destination == 0
-		if broadcast || l.Address() != l.tunnel {
+		shared := l.Address() == l.tunnel
+
+		if broadcast && shared && ind.Source == l.tunnel {
+			ind.Source = 0
+		}
+
+		if broadcast || !shared {
 			l.inbound <- ind
 		}
 	}
