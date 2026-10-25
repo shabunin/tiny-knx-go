@@ -94,6 +94,14 @@ its own address, so the tunnel gets that address:
 knxvbus -iface eth0 -serial /dev/ttyAMA0 -devices '' -monitor   # on a Raspberry Pi with a kBerry
 knxmon -tunnel 192.168.1.112 -props 1.1.4                       # a real device, from another machine
 ```
+
+With `-tunnel`, the line is connected through a tunnel to another interface instead, for example to
+reach that Raspberry Pi from a network that only this machine can reach. Several `knxvbus` can run
+on one machine with different `-port`s; ETS finds them all.
+
+```sh
+knxvbus -iface wlan0 -port 3672 -tunnel 192.168.1.112 -devices '' -name "real bus via the Pi"
+```
 `-trace` prints every KNXnet/IP packet. `-iface` must be the interface on the network of the ETS
 computer: the server answers connections only on its address there.
 

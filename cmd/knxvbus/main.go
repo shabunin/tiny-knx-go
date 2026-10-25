@@ -8,10 +8,13 @@
 //	knxvbus -iface eth0 -monitor                     # print the telegrams on the line
 //	knxvbus -iface eth0 -ets 15.15.255               # a device that ETS programs (knx-demo-tp)
 //	knxvbus -iface eth0 -serial /dev/ttyAMA0 -devices ''  # a gateway to a real line (kBerry)
+//	knxvbus -iface eth0 -tunnel 192.168.1.112 -devices '' # a gateway through another interface
 //
 // With -serial, the virtual line is connected to a real twisted pair line through a BAOS module
 // (cEMI, such as kBerry) or an older EMI2 interface. The module only acknowledges frames to its own
-// individual address, so by default the only tunnel gets that address.
+// individual address, so by default the only tunnel gets that address. With -tunnel, the line is
+// connected through a tunnel to another KNXnet/IP interface, such as a knxvbus -serial on a
+// Raspberry Pi in another network, and the tunnel here gets the address of that tunnel.
 //
 // ETS devices implement the "Temperatursensor TP" of thelsing's knx-demo-tp.knxprod (manufacturer
 // 0x00FA, application 0xABCE version 0x79). Their downloaded configuration is kept in -data.
@@ -77,6 +80,7 @@ func main() {
 	authCode := flag.String("auth", "", "device authentication code of the interface, with -password")
 	serialPort := flag.String("serial", "", "connect the line to a real one through the BAOS module or EMI2 interface on this serial port")
 	baud := flag.Int("baud", 19200, "baud rate of -serial")
+	uplinkTunnel := flag.String("tunnel", "", "connect the line to a real one through a tunnel to this KNXnet/IP interface (host[:port])")
 	flag.Parse()
 
 	if *xmlDir != "" {
@@ -99,7 +103,7 @@ func main() {
 	info := knxnet.DeviceInfo{
 		Medium:         0x02, // TP1
 		Address:        parseAddress(*address),
-		SerialNumber:   [6]byte{manufacturer >> 8, manufacturer & 0xff, 0xff, 0xff, 0, 1},
+		SerialNumber:   interfaceSerial(*port),
 		MulticastGroup: knxnet.RoutingGroup,
 		Name:           *name,
 	}
@@ -115,16 +119,29 @@ func main() {
 
 	bus := mock.NewBus()
 
-	if *serialPort != "" {
-		module := openModule(*serialPort, *baud)
-		bridge(bus, module)
+	var realLine uplink
+
+	switch {
+	case *serialPort != "" && *uplinkTunnel != "":
+		// Frames from the real line would come back through the other way.
+		log.Fatal("Use either -serial or -tunnel")
+
+	case *serialPort != "":
+		realLine = openModule(*serialPort, *baud)
+
+	case *uplinkTunnel != "":
+		realLine = openUplinkTunnel(*uplinkTunnel)
+	}
+
+	if realLine != nil {
+		bridge(bus, realLine)
 
 		tunnelsSet := false
 		flag.Visit(func(f *flag.Flag) { tunnelsSet = tunnelsSet || f.Name == "tunnels" })
 
 		if !tunnelsSet {
-			tunnelAddrs = []cemi.IndividualAddr{module.Address()}
-			*tunnels = module.Address().String()
+			tunnelAddrs = []cemi.IndividualAddr{realLine.Address()}
+			*tunnels = realLine.Address().String()
 		}
 	}
 
@@ -189,6 +206,22 @@ func main() {
 	commands(hosted, rooms)
 }
 
+// interfaceSerial returns the serial number of the interface. It differs by port, because ETS tells
+// interfaces apart by their serial numbers.
+func interfaceSerial(port int) [6]byte {
+	if port == knxnet.Port {
+		port = 1
+	}
+
+	return [6]byte{manufacturer >> 8, manufacturer & 0xff, 0xff, 0xff, byte(port >> 8), byte(port)}
+}
+
+// An uplink connects the virtual line to a real one.
+type uplink interface {
+	link.Link
+	link.Addresser
+}
+
 // openModule opens the serial module of -serial. The module is closed on SIGINT and SIGTERM, which
 // switches an EMI2 interface back to normal mode.
 func openModule(path string, baud int) *ft12.Link {
@@ -207,34 +240,51 @@ func openModule(path string, baud int) *ft12.Link {
 	}
 
 	log.Printf("Real line through %s: %v module at %v", path, module.Protocol(), module.Address())
+	closeOnSignal(module)
 
+	return module
+}
+
+// openUplinkTunnel opens the tunnel of -tunnel. It is closed on SIGINT and SIGTERM, so that the
+// other interface frees it at once.
+func openUplinkTunnel(address string) *knxip.Tunnel {
+	t, err := knxip.DialTunnel(address, knxip.DefaultTunnelConfig)
+	if err != nil {
+		log.Fatalf("Connecting to %s: %v", address, err)
+	}
+
+	log.Printf("Real line through a tunnel to %s, address %v", address, t.Address())
+	closeOnSignal(t)
+
+	return t
+}
+
+func closeOnSignal(l link.Link) {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		<-signals
-		module.Close()
+		l.Close()
 		os.Exit(1)
 	}()
-
-	return module
 }
 
 // bridge passes frames between the virtual line and the real one.
-func bridge(bus *mock.Bus, module *ft12.Link) {
-	uplink := bus.AttachUplink()
+func bridge(bus *mock.Bus, realLine uplink) {
+	up := bus.AttachUplink()
 
 	go func() {
-		for ind := range module.Inbound() {
-			uplink.Send(&cemi.LDataReq{LData: ind.LData})
+		for ind := range realLine.Inbound() {
+			up.Send(&cemi.LDataReq{LData: ind.LData})
 		}
 
-		log.Fatal("The module closed the serial link")
+		log.Fatal("The connection to the real line closed")
 	}()
 
 	go func() {
-		for ind := range uplink.Inbound() {
-			if err := module.Send(&cemi.LDataReq{LData: ind.LData}); err != nil {
+		for ind := range up.Inbound() {
+			if err := realLine.Send(&cemi.LDataReq{LData: ind.LData}); err != nil {
 				log.Printf("To the real line: %v: %s", err, pretty.Frame(&ind.LData))
 			}
 		}
