@@ -18,6 +18,9 @@ var ErrPropertyFailed = errors.New("ft12: property access rejected by module")
 type Config struct {
 	Conn ConnConfig
 
+	// Protocol is the message format of the module. ProtocolAuto, the zero value, detects it.
+	Protocol Protocol
+
 	// ConfirmTimeout is how long to wait for the L_Data.con of a sent frame. The module only
 	// confirms after the frame went out on the bus, including bus-level repetitions.
 	ConfirmTimeout time.Duration
@@ -49,15 +52,19 @@ func (cfg Config) withDefaults() Config {
 	return cfg
 }
 
-// A Link exchanges cEMI frames with a BAOS module (e.g. kBerry) that has been switched to data link
-// layer mode. Serial settings for BAOS modules are 19200 baud, 8 data bits, even parity, 1 stop bit.
+// A Link exchanges frames with a module that has been switched to data link layer mode: a BAOS
+// module (e.g. kBerry) in cEMI, or an older EMI2 interface. Frames of EMI2 modules are converted
+// to and from cEMI. Serial settings for BAOS modules are 19200 baud, 8 data bits, even parity,
+// 1 stop bit.
 type Link struct {
-	conn   *Conn
-	config Config
+	conn     *Conn
+	config   Config
+	protocol atomic.Uint32 // Protocol, ProtocolAuto until detected
 
 	sendMu sync.Mutex // one request awaiting confirmation at a time
 	cons   chan cemi.Message
 	props  chan cemi.Message
+	idents chan []byte // PEI_Identify.con of EMI2 modules
 
 	inbound chan *cemi.LDataInd
 	dropped atomic.Uint32
@@ -79,8 +86,11 @@ func Open(port io.ReadWriter, config Config) (*Link, error) {
 		config:  config,
 		cons:    make(chan cemi.Message, 1),
 		props:   make(chan cemi.Message, 1),
+		idents:  make(chan []byte, 1),
 		inbound: make(chan *cemi.LDataInd, config.InboundQueue),
 	}
+
+	l.protocol.Store(uint32(config.Protocol))
 
 	go l.serve()
 
@@ -97,9 +107,55 @@ func (l *Link) init() error {
 		return err
 	}
 
-	return l.WriteProperty(
-		cemi.ObjectTypeCEMIServer, 1, cemi.PIDCommMode, 1, []byte{cemi.CommModeDataLinkLayer},
-	)
+	switch l.Protocol() {
+	case ProtocolCEMI:
+		return l.switchCEMI(l.config.ConfirmTimeout)
+
+	case ProtocolEMI2:
+		return l.switchEMI2()
+	}
+
+	// A cEMI module answers the property write at once; an EMI2 module ignores it.
+	timeout := min(l.config.ConfirmTimeout, detectTimeout)
+
+	err := l.switchCEMI(timeout)
+	if err == nil {
+		l.protocol.Store(uint32(ProtocolCEMI))
+		return nil
+	}
+
+	if err != link.ErrConfirmTimeout {
+		return err
+	}
+
+	if _, err := l.identify(timeout); err != nil {
+		return err
+	}
+
+	l.protocol.Store(uint32(ProtocolEMI2))
+
+	return l.switchEMI2()
+}
+
+// detectTimeout limits the wait for an answer while the protocol of the module is not known.
+const detectTimeout = time.Second
+
+func (l *Link) switchCEMI(timeout time.Duration) error {
+	l.sendMu.Lock()
+	defer l.sendMu.Unlock()
+
+	return l.writeProperty(cemi.ObjectTypeCEMIServer, 1, cemi.PIDCommMode, 1,
+		[]byte{cemi.CommModeDataLinkLayer}, timeout)
+}
+
+// switchEMI2 switches an EMI2 module to data link layer mode. The module does not confirm it.
+func (l *Link) switchEMI2() error {
+	return l.send(emiSwitchLinkLayer)
+}
+
+// Protocol returns the message format of the module.
+func (l *Link) Protocol() Protocol {
+	return Protocol(l.protocol.Load())
 }
 
 // Send transmits the frame and waits for its L_Data.con.
@@ -107,7 +163,17 @@ func (l *Link) Send(req *cemi.LDataReq) error {
 	l.sendMu.Lock()
 	defer l.sendMu.Unlock()
 
-	con, err := l.request(req, l.cons, func(msg cemi.Message) bool {
+	frame := make([]byte, cemi.Size(req))
+	cemi.Pack(frame, req)
+
+	if l.Protocol() == ProtocolEMI2 {
+		var err error
+		if frame, err = emiFromCEMI(frame); err != nil {
+			return err
+		}
+	}
+
+	con, err := request(l, frame, l.cons, l.config.ConfirmTimeout, func(msg cemi.Message) bool {
 		_, ok := msg.(*cemi.LDataCon)
 		return ok
 	})
@@ -122,10 +188,15 @@ func (l *Link) Send(req *cemi.LDataReq) error {
 	return nil
 }
 
-// ReadProperty reads count elements of a property of the module, starting at index start.
+// ReadProperty reads count elements of a property of the module, starting at index start. EMI2
+// modules have no properties.
 func (l *Link) ReadProperty(
 	objectType uint16, instance, propertyID uint8, start uint16, count uint8,
 ) ([]byte, error) {
+	if l.Protocol() == ProtocolEMI2 {
+		return nil, ErrNotSupported
+	}
+
 	l.sendMu.Lock()
 	defer l.sendMu.Unlock()
 
@@ -134,7 +205,7 @@ func (l *Link) ReadProperty(
 		Count: count, Start: start,
 	}}
 
-	msg, err := l.request(req, l.props, func(msg cemi.Message) bool {
+	msg, err := request(l, packed(req), l.props, l.config.ConfirmTimeout, func(msg cemi.Message) bool {
 		con, ok := msg.(*cemi.MPropReadCon)
 		return ok && sameProperty(&con.MProp, &req.MProp)
 	})
@@ -150,19 +221,30 @@ func (l *Link) ReadProperty(
 	return con.Data, nil
 }
 
-// WriteProperty writes elements to a property of the module, starting at index start.
+// WriteProperty writes elements to a property of the module, starting at index start. EMI2
+// modules have no properties.
 func (l *Link) WriteProperty(
 	objectType uint16, instance, propertyID uint8, start uint16, data []byte,
 ) error {
+	if l.Protocol() == ProtocolEMI2 {
+		return ErrNotSupported
+	}
+
 	l.sendMu.Lock()
 	defer l.sendMu.Unlock()
 
+	return l.writeProperty(objectType, instance, propertyID, start, data, l.config.ConfirmTimeout)
+}
+
+func (l *Link) writeProperty(
+	objectType uint16, instance, propertyID uint8, start uint16, data []byte, timeout time.Duration,
+) error {
 	req := &cemi.MPropWriteReq{MProp: cemi.MProp{
 		ObjectType: objectType, Instance: instance, PropertyID: propertyID,
 		Count: 1, Start: start, Data: data,
 	}}
 
-	msg, err := l.request(req, l.props, func(msg cemi.Message) bool {
+	msg, err := request(l, packed(req), l.props, timeout, func(msg cemi.Message) bool {
 		con, ok := msg.(*cemi.MPropWriteCon)
 		return ok && sameProperty(&con.MProp, &req.MProp)
 	})
@@ -181,45 +263,68 @@ func sameProperty(a, b *cemi.MProp) bool {
 	return a.ObjectType == b.ObjectType && a.Instance == b.Instance && a.PropertyID == b.PropertyID
 }
 
-// request sends msg and waits for a matching confirmation on the given channel.
-func (l *Link) request(
-	msg cemi.Message, confirmations chan cemi.Message, matches func(cemi.Message) bool,
-) (cemi.Message, error) {
+func packed(msg cemi.Message) []byte {
+	frame := make([]byte, cemi.Size(msg))
+	cemi.Pack(frame, msg)
+
+	return frame
+}
+
+// send sends a payload to the module.
+func (l *Link) send(payload []byte) error {
+	if err := l.conn.Send(payload); err != nil {
+		if err == ErrClosed {
+			return link.ErrClosed
+		}
+
+		return err
+	}
+
+	return nil
+}
+
+// request sends a payload and waits for a matching confirmation on the given channel.
+func request[T any](
+	l *Link, payload []byte, confirmations chan T, timeout time.Duration, matches func(T) bool,
+) (T, error) {
+	var none T
+
 	// Discard a confirmation that arrived after its request timed out.
 	select {
 	case <-confirmations:
 	default:
 	}
 
-	frame := make([]byte, cemi.Size(msg))
-	cemi.Pack(frame, msg)
-
-	if err := l.conn.Send(frame); err != nil {
-		if err == ErrClosed {
-			return nil, link.ErrClosed
-		}
-
-		return nil, err
+	if err := l.send(payload); err != nil {
+		return none, err
 	}
 
-	timeout := time.NewTimer(l.config.ConfirmTimeout)
-	defer timeout.Stop()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 
 	for {
 		select {
 		case con, open := <-confirmations:
 			if !open {
-				return nil, link.ErrClosed
+				return none, link.ErrClosed
 			}
 
 			if matches(con) {
 				return con, nil
 			}
 
-		case <-timeout.C:
-			return nil, link.ErrConfirmTimeout
+		case <-timer.C:
+			return none, link.ErrConfirmTimeout
 		}
 	}
+}
+
+// identify asks an EMI2 module for its individual address and serial number.
+func (l *Link) identify(timeout time.Duration) ([]byte, error) {
+	l.sendMu.Lock()
+	defer l.sendMu.Unlock()
+
+	return request(l, []byte{emiPEIIdentifyReq}, l.idents, timeout, func([]byte) bool { return true })
 }
 
 // Address returns the individual address of the module. It is learned from the first confirmed
@@ -237,7 +342,22 @@ func (l *Link) SetAddress(addr cemi.IndividualAddr) error {
 		return err
 	}
 
-	if current != addr {
+	if current != addr && l.Protocol() == ProtocolEMI2 {
+		// PC_SetValue.req writes the memory of the module; there is no confirmation.
+		err := l.send([]byte{emiPCSetValueReq, 2, emiAddressMemory >> 8, emiAddressMemory & 0xff,
+			byte(addr >> 8), byte(addr)})
+		if err != nil {
+			return err
+		}
+
+		if current, err = l.ReadAddress(); err != nil {
+			return err
+		}
+
+		if current != addr {
+			return ErrPropertyFailed
+		}
+	} else if current != addr {
 		err := l.WriteProperty(cemi.ObjectTypeDevice, 1, cemi.PIDSubnetAddr, 1, []byte{byte(addr >> 8)})
 		if err != nil {
 			return err
@@ -254,8 +374,25 @@ func (l *Link) SetAddress(addr cemi.IndividualAddr) error {
 	return nil
 }
 
-// ReadAddress reads the individual address from the module's device object.
+// ReadAddress reads the individual address from the module's device object, or with
+// PEI_Identify from an EMI2 module.
 func (l *Link) ReadAddress() (cemi.IndividualAddr, error) {
+	if l.Protocol() == ProtocolEMI2 {
+		ident, err := l.identify(l.config.ConfirmTimeout)
+		if err != nil {
+			return 0, err
+		}
+
+		if len(ident) < 3 {
+			return 0, ErrPropertyFailed
+		}
+
+		addr := cemi.IndividualAddr(ident[1])<<8 | cemi.IndividualAddr(ident[2])
+		l.address.Store(uint32(addr))
+
+		return addr, nil
+	}
+
 	subnet, err := l.ReadProperty(cemi.ObjectTypeDevice, 1, cemi.PIDSubnetAddr, 1, 1)
 	if err != nil {
 		return 0, err
@@ -270,7 +407,10 @@ func (l *Link) ReadAddress() (cemi.IndividualAddr, error) {
 		return 0, ErrPropertyFailed
 	}
 
-	return cemi.IndividualAddr(subnet[0])<<8 | cemi.IndividualAddr(device[0]), nil
+	addr := cemi.IndividualAddr(subnet[0])<<8 | cemi.IndividualAddr(device[0])
+	l.address.Store(uint32(addr))
+
+	return addr, nil
 }
 
 // Inbound returns the frames received from the bus.
@@ -284,13 +424,19 @@ func (l *Link) Dropped() uint32 {
 	return l.dropped.Load()
 }
 
-// Close terminates the link and closes the port if it implements io.Closer.
+// Close terminates the link and closes the port if it implements io.Closer. An EMI2 module is
+// switched back to normal mode, in which it runs its own application again.
 func (l *Link) Close() error {
+	if l.Protocol() == ProtocolEMI2 {
+		l.send(emiSwitchNormal)
+	}
+
 	return l.conn.Close()
 }
 
 func (l *Link) serve() {
 	defer close(l.inbound)
+	defer close(l.idents)
 	defer close(l.props)
 	defer close(l.cons)
 
@@ -311,9 +457,32 @@ func (l *Link) serve() {
 }
 
 func (l *Link) dispatch(payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+
+	if payload[0] == emiPEIIdentifyCon {
+		offer(l.idents, payload)
+		return
+	}
+
+	switch l.Protocol() {
+	case ProtocolEMI2:
+		var ok bool
+		if payload, ok = emiToCEMI(payload); !ok {
+			return
+		}
+
+	case ProtocolAuto:
+		// Until the protocol is known, only the answers to the detection are understood.
+		if code := cemi.MessageCode(payload[0]); code != cemi.MPropWriteConCode {
+			return
+		}
+	}
+
 	// In BAOS (object server) mode the module sends frames starting with 0xF0, which is also the
 	// cEMI code of M_Reset.ind. Those are not for us.
-	if len(payload) == 0 || (payload[0] == byte(cemi.MResetIndCode) && len(payload) > 1) {
+	if payload[0] == byte(cemi.MResetIndCode) && len(payload) > 1 {
 		return
 	}
 
@@ -336,10 +505,10 @@ func (l *Link) dispatch(payload []byte) {
 			l.address.Store(uint32(msg.Source))
 		}
 
-		offer(l.cons, msg)
+		offer[cemi.Message](l.cons, msg)
 
 	case *cemi.MPropReadCon, *cemi.MPropWriteCon:
-		offer(l.props, msg)
+		offer[cemi.Message](l.props, msg)
 
 	case *cemi.MResetInd:
 		go l.init()
@@ -347,7 +516,7 @@ func (l *Link) dispatch(payload []byte) {
 }
 
 // offer replaces a pending, unclaimed confirmation with the new one.
-func offer(ch chan cemi.Message, msg cemi.Message) {
+func offer[T any](ch chan T, msg T) {
 	for {
 		select {
 		case ch <- msg:

@@ -150,11 +150,11 @@ func newTunnelServer(control, search *net.UDPConn, listener *net.TCPListener, co
 		search:   search,
 		listener: listener,
 		streams:  make(map[knxnet.HPAI]net.Conn),
-		server:  knxnet.NewServer(config.Server),
-		packets: make(chan serverPacket, 16),
-		frames:  make(chan tunnelFrame, 64),
-		done:    make(chan struct{}),
-		tunnels: make(map[uint8]*serverTunnel),
+		server:   knxnet.NewServer(config.Server),
+		packets:  make(chan serverPacket, 16),
+		frames:   make(chan tunnelFrame, 64),
+		done:     make(chan struct{}),
+		tunnels:  make(map[uint8]*serverTunnel),
 	}
 
 	s.wg.Add(1)

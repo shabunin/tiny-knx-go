@@ -36,6 +36,7 @@ type Link struct {
 	once    sync.Once
 	closed  bool
 	dropped int
+	uplink  bool
 }
 
 var (
@@ -51,6 +52,16 @@ func (bus *Bus) Attach(addr cemi.IndividualAddr) *Link {
 	bus.mu.Lock()
 	bus.links = append(bus.links, l)
 	bus.mu.Unlock()
+
+	return l
+}
+
+// AttachUplink adds a link to another medium, such as a gateway to a real twisted pair line. Frames
+// to individual addresses that no other link has are confirmed and go to the uplink only; frames
+// between links of the bus do not reach it.
+func (bus *Bus) AttachUplink() *Link {
+	l := bus.Attach(0)
+	l.uplink = true
 
 	return l
 }
@@ -91,15 +102,25 @@ func (l *Link) Send(req *cemi.LDataReq) error {
 	}
 
 	reachable := frame.Control2.IsGroupAddr() || bus.ConfirmAll
+	local := false // the destination is a link of the bus
 
 	for _, other := range bus.links {
-		if other != l && !other.closed && !frame.Control2.IsGroupAddr() &&
-			other.addr == cemi.IndividualAddr(frame.Destination) {
+		if other == l || other.closed || frame.Control2.IsGroupAddr() {
+			continue
+		}
+
+		if other.addr == cemi.IndividualAddr(frame.Destination) && !other.uplink {
+			reachable, local = true, true
+		}
+
+		if other.uplink {
 			reachable = true
 		}
 	}
 
-	if !reachable {
+	// Frames from the uplink were on the other medium already: everyone sees them, like on a twisted
+	// pair line.
+	if !reachable && !l.uplink {
 		return link.ErrNotConfirmed
 	}
 
@@ -112,7 +133,7 @@ func (l *Link) Send(req *cemi.LDataReq) error {
 	cemi.Pack(wire, &cemi.LDataInd{LData: frame})
 
 	for _, other := range bus.links {
-		if other == l || other.closed {
+		if other == l || other.closed || (other.uplink && local) {
 			continue
 		}
 
@@ -126,6 +147,10 @@ func (l *Link) Send(req *cemi.LDataReq) error {
 		default:
 			other.dropped++
 		}
+	}
+
+	if !reachable {
+		return link.ErrNotConfirmed
 	}
 
 	return nil

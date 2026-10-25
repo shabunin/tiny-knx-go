@@ -17,7 +17,7 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
  `device` | A KNX device: group objects with flags, programming mode, individual address programming, interface objects and properties, memory services
  `link`  | Interface between the protocol stack and a bus connection
  `link/mock` | In-memory bus for tests
- `link/ft12` | BAOS modules (kBerry) over FT1.2 serial, in cEMI data link layer mode
+ `link/ft12` | BAOS modules (kBerry) and older EMI2 interfaces over FT1.2 serial, in data link layer mode; the protocol is detected
  `link/tpuart` | TP-UART2 and NCN5120/5121/5130 transceivers
  `knxnet` | KNXnet/IP packets and the tunnelling client and server state machines, without I/O, with KNX IP Secure sessions
  `secure` | KNX Data Secure (A_SecureService, AES-128 CCM, sync requests) and the cryptography of KNX IP Secure
@@ -60,7 +60,11 @@ GOOS=linux GOARCH=arm64 go build ./cmd/knxmon   # GOARCH=arm GOARM=6 for 32-bit 
 ./knxmon -search                                # find KNXnet/IP interfaces and routers
 ./knxmon -port /dev/serial0 -scan 1.1           # list the devices of line 1.1
 ./knxmon -port /dev/serial0 -props 1.1.3        # dump all interface objects and properties
+./knxmon -port /dev/ttyUSB0                     # an older EMI2 interface (RS-232 BAOS, BCU2)
 ```
+
+EMI2 interfaces are switched to link layer mode with PEI_Switch and back to normal mode when the
+link is closed (knxmon does so on Ctrl-C), so that they run their own application again.
 
 On a Pico wired to the kBerry (GP0 → kBerry RX, GP1 ← kBerry TX, 3V3, GND; optional programming
 button GP15 → GND and LED on GP14):
@@ -80,6 +84,15 @@ go run ./cmd/knxvbus -iface eth0 -devices 1.1.1 -ets 15.15.255 -monitor
 ```
 
 Type `p 2` and Enter to press the programming button of device 2, `l` to list the devices.
+
+With `-serial`, the virtual line is connected to a real one through a kBerry or an EMI2 interface,
+which makes `knxvbus` a KNXnet/IP gateway to the real bus. The module only acknowledges frames to
+its own address, so the tunnel gets that address:
+
+```sh
+knxvbus -iface eth0 -serial /dev/ttyAMA0 -devices '' -monitor   # on a Raspberry Pi with a kBerry
+knxmon -tunnel 192.168.1.112 -props 1.1.4                       # a real device, from another machine
+```
 `-trace` prints every KNXnet/IP packet. `-iface` must be the interface on the network of the ETS
 computer: the server answers connections only on its address there.
 

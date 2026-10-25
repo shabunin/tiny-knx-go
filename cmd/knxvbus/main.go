@@ -7,6 +7,11 @@
 //	knxvbus -iface eth0 -devices 1.1.1,15.15.255     # a programmed and a new device
 //	knxvbus -iface eth0 -monitor                     # print the telegrams on the line
 //	knxvbus -iface eth0 -ets 15.15.255               # a device that ETS programs (knx-demo-tp)
+//	knxvbus -iface eth0 -serial /dev/ttyAMA0 -devices ''  # a gateway to a real line (kBerry)
+//
+// With -serial, the virtual line is connected to a real twisted pair line through a BAOS module
+// (cEMI, such as kBerry) or an older EMI2 interface. The module only acknowledges frames to its own
+// individual address, so by default the only tunnel gets that address.
 //
 // ETS devices implement the "Temperatursensor TP" of thelsing's knx-demo-tp.knxprod (manufacturer
 // 0x00FA, application 0xABCE version 0x79). Their downloaded configuration is kept in -data.
@@ -25,10 +30,12 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/shabunin/tiny-knx-go/apdu"
@@ -39,9 +46,11 @@ import (
 	"github.com/shabunin/tiny-knx-go/internal/vbus"
 	"github.com/shabunin/tiny-knx-go/knxnet"
 	"github.com/shabunin/tiny-knx-go/link"
+	"github.com/shabunin/tiny-knx-go/link/ft12"
 	"github.com/shabunin/tiny-knx-go/link/knxip"
 	"github.com/shabunin/tiny-knx-go/link/mock"
 	"github.com/shabunin/tiny-knx-go/secure"
+	"github.com/shabunin/tiny-knx-go/serial"
 )
 
 // The manufacturer of the hosted devices: 0x00FA, as in the demo products of the thelsing stack.
@@ -66,6 +75,8 @@ func main() {
 	xmlDir := flag.String("xml", "", "write the ETS product databases of the simulated devices to this directory and exit")
 	password := flag.String("password", "", "enable KNX IP Secure: the password of the management user 1 and the tunnelling users")
 	authCode := flag.String("auth", "", "device authentication code of the interface, with -password")
+	serialPort := flag.String("serial", "", "connect the line to a real one through the BAOS module or EMI2 interface on this serial port")
+	baud := flag.Int("baud", 19200, "baud rate of -serial")
 	flag.Parse()
 
 	if *xmlDir != "" {
@@ -103,6 +114,19 @@ func main() {
 	}
 
 	bus := mock.NewBus()
+
+	if *serialPort != "" {
+		module := openModule(*serialPort, *baud)
+		bridge(bus, module)
+
+		tunnelsSet := false
+		flag.Visit(func(f *flag.Flag) { tunnelsSet = tunnelsSet || f.Name == "tunnels" })
+
+		if !tunnelsSet {
+			tunnelAddrs = []cemi.IndividualAddr{module.Address()}
+			*tunnels = module.Address().String()
+		}
+	}
 
 	if *monitor {
 		go printTelegrams(bus.Attach(0))
@@ -163,6 +187,58 @@ func main() {
 
 	listDevices(hosted, rooms)
 	commands(hosted, rooms)
+}
+
+// openModule opens the serial module of -serial. The module is closed on SIGINT and SIGTERM, which
+// switches an EMI2 interface back to normal mode.
+func openModule(path string, baud int) *ft12.Link {
+	port, err := serial.Open(path, baud, serial.ParityEven)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	module, err := ft12.Open(port, ft12.DefaultConfig)
+	if err != nil {
+		log.Fatalf("Opening the module on %s: %v", path, err)
+	}
+
+	if _, err := module.ReadAddress(); err != nil {
+		log.Fatalf("Reading the address of the module: %v", err)
+	}
+
+	log.Printf("Real line through %s: %v module at %v", path, module.Protocol(), module.Address())
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-signals
+		module.Close()
+		os.Exit(1)
+	}()
+
+	return module
+}
+
+// bridge passes frames between the virtual line and the real one.
+func bridge(bus *mock.Bus, module *ft12.Link) {
+	uplink := bus.AttachUplink()
+
+	go func() {
+		for ind := range module.Inbound() {
+			uplink.Send(&cemi.LDataReq{LData: ind.LData})
+		}
+
+		log.Fatal("The module closed the serial link")
+	}()
+
+	go func() {
+		for ind := range uplink.Inbound() {
+			if err := module.Send(&cemi.LDataReq{LData: ind.LData}); err != nil {
+				log.Printf("To the real line: %v: %s", err, pretty.Frame(&ind.LData))
+			}
+		}
+	}()
 }
 
 func parseAddress(s string) cemi.IndividualAddr {

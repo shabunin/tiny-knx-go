@@ -25,7 +25,9 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/shabunin/tiny-knx-go/cemi"
@@ -49,7 +51,7 @@ type busLink interface {
 }
 
 func main() {
-	port := flag.String("port", "/dev/serial0", "serial port of the BAOS module or TP-UART")
+	port := flag.String("port", "/dev/serial0", "serial port of the BAOS module (cEMI or EMI2) or TP-UART")
 	baud := flag.Int("baud", 19200, "baud rate")
 	useTPUART := flag.Bool("tpuart", false, "the serial port has a TP-UART or NCN5120")
 	chip := flag.String("chip", "ncn5120", "TP-UART chip: ncn5120 or tpuart2")
@@ -148,6 +150,16 @@ func main() {
 
 	defer l.Close()
 
+	// Closing the link switches an EMI2 module back to normal mode.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-signals
+		l.Close()
+		os.Exit(1)
+	}()
+
 	log.Printf("Connected, individual address %s", l.Address())
 
 	if *write != "" {
@@ -223,10 +235,12 @@ func openBAOS(path string, baud int, ia cemi.IndividualAddr) *ft12.Link {
 		log.Fatalf("Opening BAOS link on %s: %v", path, err)
 	}
 
-	if descriptor, err := l.ReadProperty(cemi.ObjectTypeDevice, 1, cemi.PIDDeviceDescriptor, 1, 1); err == nil {
-		log.Printf("Module ready, device descriptor %x", descriptor)
+	if l.Protocol() == ft12.ProtocolEMI2 {
+		log.Printf("Module ready, EMI2")
+	} else if descriptor, err := l.ReadProperty(cemi.ObjectTypeDevice, 1, cemi.PIDDeviceDescriptor, 1, 1); err == nil {
+		log.Printf("Module ready, cEMI, device descriptor %x", descriptor)
 	} else {
-		log.Printf("Module ready, device descriptor unavailable: %v", err)
+		log.Printf("Module ready, cEMI, device descriptor unavailable: %v", err)
 	}
 
 	if ia != 0 {

@@ -93,6 +93,9 @@ type fakeModule struct {
 	address  cemi.IndividualAddr
 	writes   int // property writes other than the communication mode
 	changed  chan struct{}
+
+	emi2    bool   // speaks EMI2 instead of cEMI
+	emiMode []byte // last PEI_Switch.req
 }
 
 func newFakeModule(port *pipePort) *fakeModule {
@@ -163,6 +166,11 @@ func (m *fakeModule) notify() {
 }
 
 func (m *fakeModule) respond(payload []byte) {
+	if m.emi2 {
+		m.respondEMI(payload)
+		return
+	}
+
 	var msg cemi.Message
 	if _, err := cemi.Unpack(payload, &msg); err != nil {
 		return
