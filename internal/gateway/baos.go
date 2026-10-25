@@ -64,7 +64,8 @@ func readBAOSFrame(r *bufio.Reader) ([]byte, error) {
 
 // BAOSMedia describes the media that OpenBAOS takes.
 const BAOSMedia = `  baos:PORT[?baud=19200]            BAOS module in ObjectServer mode on a serial port
-  baos:tcp://HOST[:12004]           ObjectServer over TCP (IP BAOS, knxgw -o baos)`
+  baos:tcp://HOST[:12004]           ObjectServer over TCP (IP BAOS, knxgw -o baos)
+  baos:unix:PATH                    ObjectServer on a unix socket (knxgw -o baos:/PATH)`
 
 // OpenBAOS connects to the ObjectServer of a spec of BAOSMedia. Opening a serial module switches it
 // to ObjectServer mode; it is closed on SIGINT and SIGTERM.
@@ -86,6 +87,14 @@ func OpenBAOS(spec *Spec) (*baos.Client, error) {
 
 		tcp := newBAOSConn(conn)
 		t, closer = tcp, tcp
+	} else if path, ok := strings.CutPrefix(spec.Target, "unix:"); ok {
+		conn, err := net.Dial("unix", path)
+		if err != nil {
+			return nil, err
+		}
+
+		unix := newBAOSConn(conn)
+		t, closer = unix, unix
 	} else {
 		baud, err := spec.Int("baud", 19200)
 		if err != nil {
@@ -148,7 +157,7 @@ func openBAOSPort(name string, baud int) (*ft12.Conn, error) {
 	return conn, nil
 }
 
-// baosConn is a client connection to an ObjectServer over TCP.
+// baosConn is a client connection to an ObjectServer over TCP or a unix socket.
 type baosConn struct {
 	conn    net.Conn
 	inbound chan []byte

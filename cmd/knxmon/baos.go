@@ -14,6 +14,7 @@ import (
 
 	"github.com/shabunin/tiny-knx-go/baos"
 	"github.com/shabunin/tiny-knx-go/dpt"
+	"github.com/shabunin/tiny-knx-go/internal/gateway"
 	"github.com/shabunin/tiny-knx-go/link/ft12"
 )
 
@@ -21,24 +22,7 @@ import (
 // server items and the datapoints configured by ETS with their values, sends the commands of -set
 // and -get, and prints value indications until interrupted.
 func runBAOS(port string, baud int, set, get string) {
-	conn := ft12.NewConn(openSerial(port, baud), ft12.DefaultConnConfig)
-	if err := conn.Reset(); err != nil {
-		log.Fatalf("Resetting the module on %s: %v", port, err)
-	}
-
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		<-signals
-		conn.Close()
-		os.Exit(1)
-	}()
-
-	c, err := baos.NewClient(conn, baos.DefaultConfig)
-	if err != nil {
-		log.Fatalf("Opening the ObjectServer on %s: %v", port, err)
-	}
+	c := openObjectServer(port, baud)
 
 	printServerItems(c)
 
@@ -59,6 +43,45 @@ func runBAOS(port string, baud int, set, get string) {
 			log.Printf("Item %d = % x", item.ID, item.Data)
 		}
 	}
+}
+
+// openObjectServer opens the ObjectServer of the module on a serial port, or of knxgw at tcp://HOST[:PORT]
+// or unix:PATH.
+func openObjectServer(port string, baud int) *baos.Client {
+	if strings.HasPrefix(port, "tcp://") || strings.HasPrefix(port, "unix:") {
+		spec, err := gateway.ParseSpec("baos:" + port)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		c, err := gateway.OpenBAOS(spec)
+		if err != nil {
+			log.Fatalf("Connecting to the ObjectServer at %s: %v", port, err)
+		}
+
+		return c
+	}
+
+	conn := ft12.NewConn(openSerial(port, baud), ft12.DefaultConnConfig)
+	if err := conn.Reset(); err != nil {
+		log.Fatalf("Resetting the module on %s: %v", port, err)
+	}
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-signals
+		conn.Close()
+		os.Exit(1)
+	}()
+
+	c, err := baos.NewClient(conn, baos.DefaultConfig)
+	if err != nil {
+		log.Fatalf("Opening the ObjectServer on %s: %v", port, err)
+	}
+
+	return c
 }
 
 func printServerItems(c *baos.Client) {

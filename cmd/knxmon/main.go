@@ -19,6 +19,7 @@
 //	knxmon -port /dev/serial0 -serial-address 00c501004122:1.4.2  # set an address by serial number
 //	knxmon -port /dev/serial0 -baos              # BAOS mode: datapoints of the module's ObjectServer
 //	knxmon -port /dev/serial0 -baos -set 2=01 -get 1  # set and send DP 2, read DP 1 from the bus
+//	knxmon -port tcp://192.168.2.29 -baos        # the same through knxgw -o baos (or unix:PATH)
 package main
 
 import (
@@ -56,7 +57,7 @@ type busLink interface {
 }
 
 func main() {
-	port := flag.String("port", "/dev/serial0", "serial port of the BAOS module (cEMI or EMI2) or TP-UART")
+	port := flag.String("port", "/dev/serial0", "serial port of the BAOS module (cEMI or EMI2) or TP-UART; with -baos also tcp://HOST[:PORT] or unix:PATH of knxgw -o baos")
 	baud := flag.Int("baud", 19200, "baud rate")
 	useTPUART := flag.Bool("tpuart", false, "the serial port has a TP-UART or NCN5120")
 	chip := flag.String("chip", "ncn5120", "TP-UART chip: ncn5120 or tpuart2")
