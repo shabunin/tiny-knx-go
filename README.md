@@ -18,6 +18,7 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
  `link`  | Interface between the protocol stack and a bus connection
  `link/mock` | In-memory bus for tests
  `link/ft12` | BAOS modules (kBerry) and older EMI2 interfaces over FT1.2 serial, in data link layer mode; the protocol is detected
+ `baos` | BAOS mode: the ObjectServer protocol (versions 1 and 2) of Weinzierl modules, whose datapoints ETS configures
  `link/tpuart` | TP-UART2 and NCN5120/5121/5130 transceivers
  `knxnet` | KNXnet/IP packets and the tunnelling client and server state machines, without I/O, with KNX IP Secure sessions
  `secure` | KNX Data Secure (A_SecureService, AES-128 CCM, sync requests) and the cryptography of KNX IP Secure
@@ -63,10 +64,17 @@ GOOS=linux GOARCH=arm64 go build ./cmd/knxmon   # GOARCH=arm GOARM=6 for 32-bit 
 ./knxmon -port /dev/serial0 -progmode           # list the devices whose programming button is on
 ./knxmon -port /dev/serial0 -key ffffffff -memory 1.1.3:4000:40   # dump memory (authorized)
 ./knxmon -port /dev/ttyUSB0                     # an older EMI2 interface (RS-232 BAOS, BCU2)
+./knxmon -port /dev/serial0 -baos               # BAOS mode: the module's datapoints and values
+./knxmon -port /dev/serial0 -baos -set 2=01 -get 1   # set and send DP 2, read DP 1 from the bus
 ```
 
-EMI2 interfaces are switched to link layer mode with PEI_Switch and back to normal mode when the
-link is closed (knxmon does so on Ctrl-C), so that they run their own application again.
+A BAOS module has two modes. In data link layer mode it passes telegrams, which is what `knxmon`,
+`knxvbus -serial` and devices on a kBerry use; the module's own KNX stack then stays silent on the
+bus. In BAOS mode the module is a device of its own: ETS loads its application, which links its
+datapoints to group addresses, and a client reads and writes datapoints through the ObjectServer
+protocol (package `baos`, `knxmon -baos`). Links switch the module to data link layer mode and back
+to the mode it was in when they close (knxmon does so on Ctrl-C): kBerry modules through the cEMI
+communication mode (0x00 link layer, 0xF0 BAOS), EMI2 modules (BAOS 820) with PEI_Switch.
 
 On a Pico wired to the kBerry (GP0 → kBerry RX, GP1 ← kBerry TX, 3V3, GND; optional programming
 button GP15 → GND and LED on GP14):

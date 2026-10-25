@@ -69,6 +69,11 @@ type Link struct {
 	inbound chan *cemi.LDataInd
 	dropped atomic.Uint32
 	address atomic.Uint32 // learned from L_Data.con
+
+	// The communication mode of a cEMI module before Open, restored by Close: BAOS modules run
+	// their ObjectServer (package baos) in CommModeObjectServer.
+	restoreMode    atomic.Uint32
+	restoreModeSet atomic.Bool
 }
 
 var (
@@ -109,23 +114,19 @@ func (l *Link) init() error {
 
 	switch l.Protocol() {
 	case ProtocolCEMI:
+		l.saveCommMode(l.config.ConfirmTimeout)
 		return l.switchCEMI(l.config.ConfirmTimeout)
 
 	case ProtocolEMI2:
 		return l.switchEMI2()
 	}
 
-	// A cEMI module answers the property write at once; an EMI2 module ignores it.
+	// A cEMI module answers property requests at once; an EMI2 module ignores them.
 	timeout := min(l.config.ConfirmTimeout, detectTimeout)
 
-	err := l.switchCEMI(timeout)
-	if err == nil {
+	if l.saveCommMode(timeout) {
 		l.protocol.Store(uint32(ProtocolCEMI))
-		return nil
-	}
-
-	if err != link.ErrConfirmTimeout {
-		return err
+		return l.switchCEMI(l.config.ConfirmTimeout)
 	}
 
 	if _, err := l.identify(timeout); err != nil {
@@ -137,6 +138,9 @@ func (l *Link) init() error {
 	return l.switchEMI2()
 }
 
+// closeTimeout limits the wait for the module to confirm the mode it returns to.
+const closeTimeout = time.Second
+
 // detectTimeout limits the wait for an answer while the protocol of the module is not known.
 const detectTimeout = time.Second
 
@@ -146,6 +150,19 @@ func (l *Link) switchCEMI(timeout time.Duration) error {
 
 	return l.writeProperty(cemi.ObjectTypeCEMIServer, 1, cemi.PIDCommMode, 1,
 		[]byte{cemi.CommModeDataLinkLayer}, timeout)
+}
+
+// saveCommMode remembers the communication mode of a cEMI module, once, for Close. It reports
+// whether the module answered, i.e. whether it is a cEMI module.
+func (l *Link) saveCommMode(timeout time.Duration) bool {
+	data, err := l.readProperty(cemi.ObjectTypeCEMIServer, 1, cemi.PIDCommMode, 1, 1, timeout)
+
+	if err == nil && len(data) == 1 && data[0] != cemi.CommModeDataLinkLayer && !l.restoreModeSet.Load() {
+		l.restoreMode.Store(uint32(data[0]))
+		l.restoreModeSet.Store(true)
+	}
+
+	return err == nil || err == ErrPropertyFailed
 }
 
 // switchEMI2 switches an EMI2 module to data link layer mode. The module does not confirm it.
@@ -197,6 +214,12 @@ func (l *Link) ReadProperty(
 		return nil, ErrNotSupported
 	}
 
+	return l.readProperty(objectType, instance, propertyID, start, count, l.config.ConfirmTimeout)
+}
+
+func (l *Link) readProperty(
+	objectType uint16, instance, propertyID uint8, start uint16, count uint8, timeout time.Duration,
+) ([]byte, error) {
 	l.sendMu.Lock()
 	defer l.sendMu.Unlock()
 
@@ -205,7 +228,7 @@ func (l *Link) ReadProperty(
 		Count: count, Start: start,
 	}}
 
-	msg, err := request(l, packed(req), l.props, l.config.ConfirmTimeout, func(msg cemi.Message) bool {
+	msg, err := request(l, packed(req), l.props, timeout, func(msg cemi.Message) bool {
 		con, ok := msg.(*cemi.MPropReadCon)
 		return ok && sameProperty(&con.MProp, &req.MProp)
 	})
@@ -458,11 +481,21 @@ func (l *Link) Dropped() uint32 {
 	return l.dropped.Load()
 }
 
-// Close terminates the link and closes the port if it implements io.Closer. An EMI2 module is
-// switched back to normal mode, in which it runs its own application again.
+// Close terminates the link and closes the port if it implements io.Closer. The module goes back to
+// the mode it was in before Open, in which a BAOS module runs its own application again: an EMI2
+// module to normal mode, a cEMI module to its former communication mode.
 func (l *Link) Close() error {
-	if l.Protocol() == ProtocolEMI2 {
+	switch l.Protocol() {
+	case ProtocolEMI2:
 		l.send(emiSwitchNormal)
+
+	case ProtocolCEMI:
+		if l.restoreModeSet.Load() {
+			l.sendMu.Lock()
+			l.writeProperty(cemi.ObjectTypeCEMIServer, 1, cemi.PIDCommMode, 1,
+				[]byte{byte(l.restoreMode.Load())}, closeTimeout)
+			l.sendMu.Unlock()
+		}
 	}
 
 	return l.conn.Close()
@@ -509,7 +542,7 @@ func (l *Link) dispatch(payload []byte) {
 
 	case ProtocolAuto:
 		// Until the protocol is known, only the answers to the detection are understood.
-		if code := cemi.MessageCode(payload[0]); code != cemi.MPropWriteConCode {
+		if code := cemi.MessageCode(payload[0]); code != cemi.MPropReadConCode && code != cemi.MPropWriteConCode {
 			return
 		}
 	}

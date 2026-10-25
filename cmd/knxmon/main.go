@@ -17,6 +17,8 @@
 //	knxmon -port /dev/serial0 -scan 1.1          # list the devices of line 1.1
 //	knxmon -port /dev/serial0 -props 1.1.3       # read all properties of a device
 //	knxmon -port /dev/serial0 -serial-address 00c501004122:1.4.2  # set an address by serial number
+//	knxmon -port /dev/serial0 -baos              # BAOS mode: datapoints of the module's ObjectServer
+//	knxmon -port /dev/serial0 -baos -set 2=01 -get 1  # set and send DP 2, read DP 1 from the bus
 package main
 
 import (
@@ -72,6 +74,9 @@ func main() {
 	memory := flag.String("memory", "", "dump memory of a device: IA:ADDRESS:COUNT in hex, e.g. 1.1.3:4000:40")
 	key := flag.String("key", "", "authorize with this key (hex, e.g. ffffffff) before -memory")
 	serialAddress := flag.String("serial-address", "", "assign an address by serial number, without programming mode: SERIAL:IA, e.g. 00c501004122:1.4.2")
+	useBAOS := flag.Bool("baos", false, "talk to the ObjectServer of the BAOS module (BAOS mode) instead of the bus")
+	baosSet := flag.String("set", "", "with -baos: set and send datapoints, ID=HEX[,ID=HEX...]")
+	baosGet := flag.String("get", "", "with -baos: read datapoints from the bus, ID[,ID...]")
 	address := flag.String("address", "", "set our individual address (BAOS module, TP-UART, routing)")
 	user := flag.Int("user", 2, "user ID for a secure tunnel, with -password")
 	password := flag.String("password", "", "open the tunnel in a KNX IP Secure session with this user password")
@@ -89,6 +94,11 @@ func main() {
 
 	if *search {
 		printServers(ifi)
+		return
+	}
+
+	if *useBAOS {
+		runBAOS(*port, *baud, *baosSet, *baosGet)
 		return
 	}
 

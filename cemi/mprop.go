@@ -23,6 +23,7 @@ const (
 	CommModeRawFrames      uint8 = 0x02
 	CommModeNoLayer        uint8 = 0xFF
 	CommModeTransportLayer uint8 = 0x06
+	CommModeObjectServer   uint8 = 0xF0 // BAOS mode of Weinzierl modules (package baos)
 )
 
 // MProp is the body of the M_Prop* messages, which access the interface object properties of a

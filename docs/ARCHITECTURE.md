@@ -34,6 +34,7 @@ Arduino, with the bus connection and the configuration source kept pluggable.
  knxnet     KNXnet/IP packets, tunnel client and server   done
             (no I/O)
  mgmt       line scan, property reader                    done
+ baos       ObjectServer protocol 1.x/2.x (BAOS mode)     done
  ─────────────────────────────────────────────────────────
  link       Link interface                                done
    ft12       BAOS / kBerry over FT1.2 (cEMI LL mode)      done
@@ -102,12 +103,27 @@ object table is ignored.
    that OpenKNXproducer turns into a .knxprod and gives the firmware its group objects and
    parameter offsets. `knxvbus -sim` hosts a small installation built on it (`internal/vbus`:
    switch, dimmer, push buttons, thermostat, heating actuator, and rooms that the heating warms).
+9. ✅ BAOS mode: `baos` (ObjectServer protocol 1.x and 2.x: server items, datapoint descriptions,
+   values, commands, parameters, indications; version detection and switching from link layer
+   mode), `knxmon -baos`. `link/ft12` restores the module's mode on `Close`. Tested with a kBerry
+   (2.0) and a BAOS Module 820 (1.x).
 
 ## Hardware notes
 
 - BAOS modules (kBerry = BAOS 838): 19200 baud, 8 data bits, even parity, 1 stop bit. The driver
   switches the module to data link layer mode by writing `PID_COMM_MODE` (52) = 0 on the cEMI
-  server object, and does it again after the module resets.
+  server object, and does it again after the module resets. `Close` writes back the mode it found,
+  usually 0xF0, the BAOS (ObjectServer) mode; the Weinzierl SDK names the modes Link 0x00,
+  Busmonitor 0x01, Raw 0x02, 0x06, 0xF0 and None 0xFF. In link layer mode the module's own stack
+  does not answer on the bus (no DeviceDescriptorResponse to ETS) and it ignores ObjectServer
+  requests; in BAOS mode it answers ETS as a device (mask 07B0, order number "838").
+- BAOS Module 820 (RS-232, BCU2 mask 0701): EMI2 for link layer mode, ObjectServer protocol 1.x in
+  normal mode on the same FT1.2 line; each version ignores requests of the other, which is how
+  `baos.NewClient` detects it. It has 250 datapoints and a 240-byte buffer, and reports the first ID
+  it could not take in a negative response (buffer too small at the 79th description, bad ID 251).
+  It ignores PC_GetValue/PC_SetValue, so its individual address is assigned over the bus, e.g.
+  `knxmon -serial-address`. Version 2 (kBerry) rejects server item ranges that start after its last
+  item (17) and answers "no element" for datapoint ranges without configured datapoints.
 - TinyGo's `machine.UART.Read` returns immediately when no data is buffered; the FT1.2 driver
   polls it every millisecond.
 - Frames we originate use control field 0xBC (low priority), the value ETS uses

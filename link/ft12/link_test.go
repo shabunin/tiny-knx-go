@@ -204,6 +204,8 @@ func (m *fakeModule) respond(payload []byte) {
 
 		m.mu.Lock()
 		switch {
+		case req.ObjectType == cemi.ObjectTypeCEMIServer && req.PropertyID == cemi.PIDCommMode:
+			con.Data = []byte{m.commMode}
 		case req.ObjectType == cemi.ObjectTypeDevice && req.PropertyID == cemi.PIDDeviceDescriptor:
 			con.Data = []byte{0x07, 0xb0}
 		case req.ObjectType == cemi.ObjectTypeDevice && req.PropertyID == cemi.PIDSubnetAddr:
@@ -384,7 +386,7 @@ func TestSend(t *testing.T) {
 	}
 
 	// Every confirmation from the module must have been acknowledged.
-	module.waitFor(t, "acknowledgements", func() bool { return module.acks == 3 })
+	module.waitFor(t, "acknowledgements", func() bool { return module.acks == 4 })
 }
 
 func TestSendRetransmits(t *testing.T) {
@@ -398,15 +400,15 @@ func TestSendRetransmits(t *testing.T) {
 		t.Fatalf("Send failed: %v", err)
 	}
 
-	// Comm mode write plus three copies of the group write.
+	// Comm mode read and write plus three copies of the group write.
 	frames := module.dataFrames()
-	if len(frames) != 4 {
-		t.Fatalf("Module received %d data frames, expected 4", len(frames))
+	if len(frames) != 5 {
+		t.Fatalf("Module received %d data frames, expected 5", len(frames))
 	}
 
-	for _, frame := range frames[2:] {
-		if frame.Control != frames[1].Control || !bytes.Equal(frame.Payload, frames[1].Payload) {
-			t.Errorf("Retransmission %+v differs from original %+v", frame, frames[1])
+	for _, frame := range frames[3:] {
+		if frame.Control != frames[2].Control || !bytes.Equal(frame.Payload, frames[2].Payload) {
+			t.Errorf("Retransmission %+v differs from original %+v", frame, frames[2])
 		}
 	}
 }
@@ -475,7 +477,7 @@ func TestInbound(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	module.waitFor(t, "acknowledgements", func() bool { return module.acks == 4 })
+	module.waitFor(t, "acknowledgements", func() bool { return module.acks == 5 })
 }
 
 func TestReadProperty(t *testing.T) {
@@ -546,6 +548,15 @@ func TestModuleResetRestoresLinkLayer(t *testing.T) {
 	module.waitFor(t, "comm mode restored", func() bool {
 		return module.commMode == cemi.CommModeDataLinkLayer
 	})
+}
+
+func TestCloseRestoresCommMode(t *testing.T) {
+	l, module := openTestLink(t)
+
+	l.Close()
+
+	// The module was in ObjectServer (BAOS) mode before Open.
+	module.waitFor(t, "ObjectServer mode", func() bool { return module.commMode == cemi.CommModeObjectServer })
 }
 
 func TestClose(t *testing.T) {
