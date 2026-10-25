@@ -59,16 +59,12 @@ func ReadProperties(c *transport.Client, options PropertyOptions) ([]Property, e
 
 		objectType := uint16(value[0])<<8 | uint16(value[1])
 
-		for index := 0; index < 256; index++ {
-			description, err := c.DescribeProperty(object, 0, uint8(index))
-			if err != nil {
-				return properties, err
-			}
+		descriptions, err := describeObject(c, object)
+		if err != nil {
+			return properties, err
+		}
 
-			if description.MaxElements == 0 || description.PropertyID == 0 {
-				break
-			}
-
+		for _, description := range descriptions {
 			p := Property{Object: object, ObjectType: objectType, PropertyDescriptionResponse: description}
 
 			if options.Values {
@@ -85,19 +81,70 @@ func ReadProperties(c *transport.Client, options PropertyOptions) ([]Property, e
 	return properties, nil
 }
 
+// describeObject returns the descriptions of the properties of an object, by index. Some devices
+// (Zennio's BCU2 devices) leave the property ID out of the descriptions by index; their properties
+// are then found by describing property IDs until as many as there are indexes are found.
+func describeObject(c *transport.Client, object uint8) ([]apdu.PropertyDescriptionResponse, error) {
+	var descriptions []apdu.PropertyDescriptionResponse
+
+	anonymous := false
+
+	for index := 0; index < 256; index++ {
+		description, err := c.DescribeProperty(object, 0, uint8(index))
+		if err != nil {
+			return descriptions, err
+		}
+
+		if description.MaxElements == 0 {
+			break
+		}
+
+		anonymous = anonymous || description.PropertyID == 0
+		descriptions = append(descriptions, description)
+	}
+
+	if !anonymous {
+		return descriptions, nil
+	}
+
+	count := len(descriptions)
+	descriptions = descriptions[:0]
+
+	for id := 1; id < 256 && len(descriptions) < count; id++ {
+		description, err := c.DescribeProperty(object, uint8(id), 0)
+		if errors.Is(err, transport.ErrRejected) {
+			continue
+		}
+
+		if err != nil {
+			return descriptions, err
+		}
+
+		if description.PropertyID == uint8(id) && description.MaxElements != 0 {
+			descriptions = append(descriptions, description)
+		}
+	}
+
+	return descriptions, nil
+}
+
 // readValue reads the number of elements of a property and then its first elements, as many per
-// request as fit in a standard frame.
+// request as fit in a standard frame. Devices that do not tell the number of elements (Zennio's
+// BCU2 devices reject element 0) are taken to have the maximum.
 func readValue(c *transport.Client, d apdu.PropertyDescriptionResponse, max uint16) (uint16, []byte, error) {
+	var elements uint16
+
 	count, err := c.ReadProperty(d.Object, d.PropertyID, 0, 1)
-	if err != nil {
+
+	switch {
+	case errors.Is(err, transport.ErrRejected) || err == nil && len(count) != 2:
+		elements = d.MaxElements
+	case err != nil:
 		return 0, nil, err
+	default:
+		elements = uint16(count[0])<<8 | uint16(count[1])
 	}
 
-	if len(count) != 2 {
-		return 0, nil, transport.ErrRejected
-	}
-
-	elements := uint16(count[0])<<8 | uint16(count[1])
 	n := elements
 
 	if n > max {

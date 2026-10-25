@@ -60,6 +60,7 @@ GOOS=linux GOARCH=arm64 go build ./cmd/knxmon   # GOARCH=arm GOARM=6 for 32-bit 
 ./knxmon -search                                # find KNXnet/IP interfaces and routers
 ./knxmon -port /dev/serial0 -scan 1.1           # list the devices of line 1.1
 ./knxmon -port /dev/serial0 -props 1.1.3        # dump all interface objects and properties
+./knxmon -port /dev/serial0 -progmode           # list the devices whose programming button is on
 ./knxmon -port /dev/ttyUSB0                     # an older EMI2 interface (RS-232 BAOS, BCU2)
 ```
 

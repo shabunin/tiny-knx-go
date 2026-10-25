@@ -154,6 +154,65 @@ func TestReadProperties(t *testing.T) {
 	}
 }
 
+// Zennio devices leave the property ID out of the descriptions by index, and reject reading the
+// number of elements.
+func TestReadPropertiesWithoutIDs(t *testing.T) {
+	bus := mock.NewBus()
+	addr := cemi.NewIndividualAddr3(1, 1, 10)
+	startDevice(t, bus, addr, 0x0701)
+
+	byIndex := false
+
+	bus.Drop = func(from cemi.IndividualAddr, frame *cemi.LData) bool {
+		app, ok := frame.Data.(*cemi.AppData)
+		if !ok || app.Command != cemi.Escape || len(app.Data) < 4 {
+			return false
+		}
+
+		switch app.Data[0] {
+		case 0xD8: // PropertyDescription_Read
+			byIndex = app.Data[2] == 0
+		case 0xD9: // PropertyDescription_Response
+			if byIndex {
+				app.Data[2] = 0
+			}
+		case 0xD6: // PropertyResponse
+			if len(app.Data) >= 5 && app.Data[3]&0x0F == 0 && app.Data[4] == 0 {
+				app.Data = app.Data[:5]
+				app.Data[3] = 0 // no elements: rejected
+			}
+		}
+
+		return false
+	}
+
+	client := transport.NewClient(bus.Attach(toolAddr), transport.DefaultConfig)
+	defer client.Close()
+
+	if err := client.Connect(addr); err != nil {
+		t.Fatal(err)
+	}
+
+	properties, err := ReadProperties(client, PropertyOptions{Values: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(properties) != 15 {
+		t.Errorf("Read %d properties", len(properties))
+	}
+
+	for _, p := range properties {
+		if p.PropertyID == 0 || p.Err != nil {
+			t.Errorf("Property %+v", p)
+		}
+
+		if p.PropertyID == 11 && (p.Elements != 1 || !bytes.Equal(p.Value, []byte{0x00, 0xfa, 0, 0, 0, 10})) {
+			t.Errorf("Serial number %d elements, % x", p.Elements, p.Value)
+		}
+	}
+}
+
 func TestNames(t *testing.T) {
 	cases := []struct{ got, want string }{
 		{PropertyName(0, 11), "SERIAL_NUMBER"},

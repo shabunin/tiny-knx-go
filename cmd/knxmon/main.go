@@ -65,6 +65,7 @@ func main() {
 	write := flag.String("write", "", "send a group write: GA=HEX, e.g. 1/1/1=1")
 	read := flag.String("read", "", "send a group read to GA, e.g. 1/1/1")
 	info := flag.String("info", "", "read the identity of the device at this individual address")
+	progMode := flag.Bool("progmode", false, "list the devices in programming mode, until interrupted")
 	address := flag.String("address", "", "set our individual address (BAOS module, TP-UART, routing)")
 	user := flag.Int("user", 2, "user ID for a secure tunnel, with -password")
 	password := flag.String("password", "", "open the tunnel in a KNX IP Secure session with this user password")
@@ -203,6 +204,11 @@ func main() {
 		return
 	}
 
+	if *progMode {
+		listProgMode(l)
+		return
+	}
+
 	if *props != "" {
 		printProperties(l, *props)
 		return
@@ -256,6 +262,48 @@ func openBAOS(path string, baud int, ia cemi.IndividualAddr) *ft12.Link {
 	}
 
 	return l
+}
+
+// listProgMode asks for the devices in programming mode every few seconds, with a broadcast
+// IndividualAddress_Read, and prints each one that answers for the first time.
+func listProgMode(l busLink) {
+	req := &cemi.LDataReq{LData: cemi.LData{
+		Control1: cemi.Control1Request(cemi.PrioSystem),
+		Control2: cemi.Control2GroupAddr | cemi.Control2Hops(6),
+		Data:     &cemi.AppData{Command: cemi.IndividualAddrRequest},
+	}}
+
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	seen := make(map[cemi.IndividualAddr]bool)
+
+	log.Print("Waiting for devices in programming mode")
+
+	for {
+		if err := l.Send(req); err != nil {
+			log.Printf("Sending IndividualAddress_Read: %v", err)
+		}
+
+	wait:
+		for {
+			select {
+			case ind, open := <-l.Inbound():
+				if !open {
+					return
+				}
+
+				app, ok := ind.Data.(*cemi.AppData)
+				if ok && app.Command == cemi.IndividualAddrResponse && !seen[ind.Source] {
+					seen[ind.Source] = true
+					fmt.Printf("%s  in programming mode\n", ind.Source)
+				}
+
+			case <-ticker.C:
+				break wait
+			}
+		}
+	}
 }
 
 func send(l link.Link, addr string, command cemi.APCI, data []byte) {
