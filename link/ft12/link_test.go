@@ -577,3 +577,45 @@ func TestClose(t *testing.T) {
 		t.Errorf("Send after Close: got %v, expected %v", err, link.ErrClosed)
 	}
 }
+
+// After a module restarts, its frame count starts again: the next frame follows a reset and has
+// FCB = 1, else the module may take it for a repetition and drop it.
+func TestConnResetsAfterModuleRestart(t *testing.T) {
+	host, port := serialLine()
+	module := newFakeModule(port)
+
+	conn := NewConn(host, ConnConfig{})
+	defer conn.Close()
+
+	if err := conn.Reset(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := conn.Send([]byte{0xf0, 0x01, 0x01, 0x01}); err != nil { // FCB = 1, the next has 0
+		t.Fatal(err)
+	}
+
+	module.port.Write(AppendFixed(nil, ControlResetInd))
+
+	select {
+	case <-conn.Resets():
+	case <-time.After(time.Second):
+		t.Fatal("no reset indication")
+	}
+
+	if err := conn.Send([]byte{0xf0, 0x01, 0x01, 0x01}); err != nil {
+		t.Fatal(err)
+	}
+
+	module.mu.Lock()
+	defer module.mu.Unlock()
+
+	n := len(module.received)
+	if n < 2 || module.received[n-2].Kind != KindFixed || module.received[n-2].Control != ControlResetReq {
+		t.Fatalf("no reset before the frame: %+v", module.received)
+	}
+
+	if module.received[n-1].Control&ControlFCB == 0 {
+		t.Errorf("frame after the restart has FCB = 0")
+	}
+}

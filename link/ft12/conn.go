@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -68,6 +69,10 @@ type Conn struct {
 	fcb     bool       // FCB of the next data frame
 	synced  bool       // a reset has been acknowledged since the last failure
 
+	// restarted is set by a reset indication: the module restarted and expects the frame count
+	// to start again, which the next Send does with a reset.
+	restarted atomic.Bool
+
 	acks    chan struct{}
 	resets  chan struct{}
 	inbound chan []byte
@@ -120,6 +125,8 @@ func (conn *Conn) Reset() error {
 }
 
 func (conn *Conn) reset() error {
+	conn.restarted.Store(false)
+
 	if err := conn.transmit(AppendFixed(nil, ControlResetReq)); err != nil {
 		return err
 	}
@@ -145,7 +152,7 @@ func (conn *Conn) Send(payload []byte) error {
 	conn.sendMu.Lock()
 	defer conn.sendMu.Unlock()
 
-	if !conn.synced {
+	if conn.restarted.Swap(false) || !conn.synced {
 		if err := conn.reset(); err != nil {
 			return err
 		}
@@ -292,6 +299,8 @@ func (conn *Conn) handle(frame Frame) {
 		conn.write([]byte{Ack})
 
 		if frame.Control == ControlResetInd {
+			conn.restarted.Store(true)
+
 			conn.recvMu.Lock()
 			conn.lastRecv = nil
 			conn.recvMu.Unlock()

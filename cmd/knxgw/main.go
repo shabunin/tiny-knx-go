@@ -433,6 +433,11 @@ func runBAOS(input *gateway.Spec, outputs specs) {
 
 			go func() {
 				for ind := range indications {
+					if ind.Restarted {
+						log.Print("The module restarted")
+						describe(c)
+					}
+
 					for _, v := range ind.Values {
 						log.Printf("DP %d = % x", v.ID, v.Data)
 					}
@@ -455,7 +460,10 @@ func runBAOS(input *gateway.Spec, outputs specs) {
 // describe prints the identity of the ObjectServer and the number of datapoints.
 func describe(c *baos.Client) {
 	items, err := c.ServerItems(baos.ItemHardwareType, baos.ItemProgrammingMode)
-	check(err)
+	if err != nil {
+		log.Printf("Reading the server items: %v", err)
+		return
+	}
 
 	byID := map[uint16][]byte{}
 	for _, item := range items {
@@ -468,7 +476,10 @@ func describe(c *baos.Client) {
 	}
 
 	descriptions, err := c.Descriptions(1, count)
-	check(err)
+	if err != nil {
+		log.Printf("Reading the datapoint descriptions: %v", err)
+		return
+	}
 
 	configured := 0
 	for _, d := range descriptions {

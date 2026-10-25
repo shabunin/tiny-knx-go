@@ -403,6 +403,15 @@ func TestClientRestoresModeAfterRestart(t *testing.T) {
 		c.mu.Unlock()
 		server.resets <- struct{}{}
 
+		select {
+		case ind := <-c.Indications():
+			if !ind.Restarted {
+				t.Errorf("v%d: indication %+v", v, ind)
+			}
+		case <-time.After(time.Second):
+			t.Errorf("v%d: restart not indicated", v)
+		}
+
 		deadline := time.Now().Add(2 * time.Second)
 
 		for {
@@ -431,5 +440,38 @@ func TestClientRestoresModeWithoutIndication(t *testing.T) {
 
 	if _, err := c.ServerItems(ItemFirmwareVersion, 1); err != nil {
 		t.Errorf("after the restart: %v", err)
+	}
+}
+
+func TestClientSetValuesInChunks(t *testing.T) {
+	for _, v := range []Version{Version1, Version2} {
+		server := newFakeServer(v)
+		server.buffer = 30
+
+		c, err := NewClient(server, Config{Version: v})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		server.requests = 0
+
+		var values []SetValue
+		for id := uint16(1); id <= 10; id++ {
+			values = append(values, SetValue{ID: id, Command: CommandSetAndSend, Data: []byte{1, 2, 3, 4}})
+		}
+
+		if err := c.SetValues(values...); err != nil {
+			t.Fatalf("v%d: %v", v, err)
+		}
+
+		// Version 2: 6 + 3*8 = 30 bytes per request; version 1: 4 + 4*6 = 28.
+		want := map[Version]int{Version1: 3, Version2: 4}[v]
+		if server.requests != want {
+			t.Errorf("v%d: %d requests, want %d", v, server.requests, want)
+		}
+
+		if last := server.lastWrite; len(last) == 0 || last[len(last)-1].ID != 10 {
+			t.Errorf("v%d: last request %+v", v, last)
+		}
 	}
 }

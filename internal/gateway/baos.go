@@ -248,6 +248,10 @@ func serveBAOSConn(conn net.Conn, h *BAOSHub) {
 		for {
 			select {
 			case ind := <-indications:
+				if ind.Raw == nil {
+					continue // a restart, which has no message
+				}
+
 				if write(ind.Raw) != nil {
 					conn.Close()
 					return

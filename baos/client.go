@@ -64,6 +64,10 @@ type Indication struct {
 	Values []Value
 	Items  []Item
 	Raw    []byte // the message as received
+
+	// Restarted reports that the module restarted, e.g. after a download by ETS, which may have
+	// changed its datapoints. It comes alone, without a message.
+	Restarted bool
 }
 
 // A Client talks to an ObjectServer. It sends one request at a time.
@@ -76,6 +80,7 @@ type Client struct {
 	mu          sync.Mutex
 	responses   chan []byte
 	indications chan Indication
+	restarted   chan struct{}
 }
 
 // These messages switch a Weinzierl module to ObjectServer mode: cEMI modules (kBerry) through
@@ -113,6 +118,7 @@ func NewClient(t Transport, config Config) (*Client, error) {
 		config:      config,
 		buffer:      64,
 		responses:   make(chan []byte, 1),
+		restarted:   make(chan struct{}, 1),
 		indications: make(chan Indication, config.Indications),
 	}
 
@@ -176,7 +182,8 @@ func (c *Client) detect() error {
 }
 
 // restore switches the module back to ObjectServer mode after each restart, e.g. when ETS
-// restarts it after a download. Each module ignores the message of the other kind.
+// restarts it after a download, and reports the restart as an indication. Each module ignores the
+// message of the other kind.
 func (c *Client) restore(resets <-chan struct{}) {
 	for range resets {
 		time.Sleep(restartDelay)
@@ -185,6 +192,11 @@ func (c *Client) restore(resets <-chan struct{}) {
 		c.t.Send(cemiObjectServerMode)
 		c.t.Send(emiNormalMode)
 		c.mu.Unlock()
+
+		select {
+		case c.restarted <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -206,7 +218,28 @@ func (c *Client) serve() {
 	defer close(c.responses)
 	defer close(c.indications)
 
-	for payload := range c.t.Inbound() {
+	inbound := c.t.Inbound()
+
+	for {
+		var payload []byte
+
+		select {
+		case p, open := <-inbound:
+			if !open {
+				return
+			}
+
+			payload = p
+
+		case <-c.restarted:
+			select {
+			case c.indications <- Indication{Restarted: true}:
+			default:
+			}
+
+			continue
+		}
+
 		if len(payload) < 2 || payload[0] != MainService {
 			continue
 		}
@@ -531,21 +564,43 @@ func (c *Client) Values(start, count uint16, filter Filter) ([]Value, error) {
 	return all, err
 }
 
-// SetValues sends datapoint commands, which must have ascending IDs.
+// SetValues sends datapoint commands, which must have ascending IDs. Commands that do not fit
+// into the buffer of the server together go in several requests.
 func (c *Client) SetValues(values ...SetValue) error {
 	v := c.Version()
 
-	req, err := AppendSetDatapointValue(nil, v, values)
-	if err != nil {
-		return err
+	// Each command takes its ID, the command and the length (packed into one byte in version
+	// 1), and the value.
+	overhead := 4
+	if v == Version1 {
+		overhead = 2
 	}
 
-	m, err := c.request(v, req, c.config.Timeout)
-	if err != nil {
-		return err
+	for len(values) > 0 {
+		n, size := 0, v.headerSize()
+		for n < len(values) && (n == 0 || size+overhead+len(values[n].Data) <= c.buffer) {
+			size += overhead + len(values[n].Data)
+			n++
+		}
+
+		req, err := AppendSetDatapointValue(nil, v, values[:n])
+		if err != nil {
+			return err
+		}
+
+		m, err := c.request(v, req, c.config.Timeout)
+		if err != nil {
+			return err
+		}
+
+		if err := m.Err(); err != nil {
+			return err
+		}
+
+		values = values[n:]
 	}
 
-	return m.Err()
+	return nil
 }
 
 // ParameterBytes reads the parameter bytes from start to start+count-1. They are numbered from 1.
