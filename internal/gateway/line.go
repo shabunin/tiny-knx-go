@@ -61,20 +61,9 @@ func OpenLine(spec *Spec) (*Line, error) {
 
 		spec.Has("device") // asked for by the caller
 
-		port, err := serial.Open(spec.Target, baud, serial.ParityEven)
+		module, err := OpenModule(spec.Target, baud)
 		if err != nil {
 			return nil, err
-		}
-
-		module, err := ft12.Open(port, ft12.DefaultConfig)
-		if err != nil {
-			port.Close()
-			return nil, fmt.Errorf("opening the module on %s: %v", spec.Target, err)
-		}
-
-		if _, err := module.ReadAddress(); err != nil {
-			module.Close()
-			return nil, fmt.Errorf("reading the address of the module on %s: %v", spec.Target, err)
 		}
 
 		log.Printf("Real line through %s: %v module at %v", spec.Target, module.Protocol(), module.Address())
@@ -170,6 +159,28 @@ func OpenLine(spec *Spec) (*Line, error) {
 	CloseOnSignal(l)
 
 	return l, nil
+}
+
+// OpenModule opens a serial module in data link layer mode and reads its address. Closing it
+// restores the previous mode of a cEMI module and switches an EMI2 module to normal mode.
+func OpenModule(name string, baud int) (*ft12.Link, error) {
+	port, err := serial.Open(name, baud, serial.ParityEven)
+	if err != nil {
+		return nil, err
+	}
+
+	module, err := ft12.Open(port, ft12.DefaultConfig)
+	if err != nil {
+		port.Close()
+		return nil, fmt.Errorf("opening the module on %s: %v", name, err)
+	}
+
+	if _, err := module.ReadAddress(); err != nil {
+		module.Close()
+		return nil, fmt.Errorf("reading the address of the module on %s: %v", name, err)
+	}
+
+	return module, nil
 }
 
 // Interface returns the network interface of this name, or nil for an empty name.

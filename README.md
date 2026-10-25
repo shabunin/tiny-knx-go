@@ -105,6 +105,18 @@ knxgw -i baos:/dev/ttyAMA0 -o baos:wlan0 -o monitor   # on the Pi
 knxgw -i baos:tcp://192.168.2.29 -o monitor           # anywhere else
 ```
 
+`-o baos:/PATH` serves the same frames on a unix socket, for programs on the same host.
+
+`baos_auto` makes a module both, like an IP BAOS: it stays in ObjectServer mode until ETS opens a
+tunnel of a knxip output, switches to data link layer mode for the tunnel, and goes back to
+ObjectServer mode 5 seconds (`?idle=`) after the last tunnel closed. While ETS has the line, the
+ObjectServer clients are disconnected and new ones turned away; `p` switches the programming mode
+in either mode (server item 15 in ObjectServer mode).
+
+```sh
+knxgw -i baos_auto:/dev/ttyAMA0 -o knxip:wlan0 -o baos:wlan0 -o baos:/run/knxgw.sock
+```
+
 ETS reaches a kBerry itself through the tunnel of its address: the module answers frames to its
 own address from the serial side, in data link layer mode too. So ETS can assign its address and
 download its BAOS application through the gateway on that very module; `p` on standard input

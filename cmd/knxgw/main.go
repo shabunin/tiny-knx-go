@@ -19,7 +19,12 @@
 //	knxgw -i baos:tcp://192.168.2.29 -o monitor
 //
 // A module is in one mode at a time: ft12 switches it to data link layer mode, baos to
-// ObjectServer mode. ft12 restores the previous mode when knxgw ends.
+// ObjectServer mode. ft12 restores the previous mode when knxgw ends. baos_auto switches it, like an
+// IP BAOS that is an ObjectServer and an interface at once: the module is in ObjectServer mode until
+// ETS opens a tunnel, in data link layer mode while the tunnel is open, and back in ObjectServer
+// mode a few seconds after it closed:
+//
+//	knxgw -i baos_auto:/dev/ttyAMA0 -o knxip:wlan0 -o baos:wlan0 -o baos:/run/knxgw.sock
 //
 // A cEMI module (kBerry) answers frames to its own address from the serial side with its own device
 // stack, also in data link layer mode. The tunnel has the module's address, so ETS reaches the
@@ -84,7 +89,16 @@ BAOS mode input:
 
 BAOS mode outputs:
   baos:[IFACE][?port=12004]         ObjectServer over TCP, like an IP BAOS
+  baos:/PATH                        ObjectServer over a unix socket, the same frames
   monitor                           print the datapoint value indications
+
+Auto mode input:
+  baos_auto:PORT[?baud=19200&idle=5s]
+                                    BAOS module in ObjectServer mode, switched to data link
+                                    layer mode while a tunnel is open and for idle after
+
+Auto mode outputs: knxip (at least one), baos and monitor as above. While ETS has a tunnel, the
+ObjectServer is gone and its clients are turned away.
 
 Options:
 `
@@ -108,7 +122,7 @@ func main() {
 
 	baosInputs := 0
 	for _, in := range inputs {
-		if in.Scheme == "baos" {
+		if in.Scheme == "baos" || in.Scheme == "baos_auto" {
 			baosInputs++
 		}
 	}
@@ -117,11 +131,14 @@ func main() {
 	case baosInputs == 0:
 		runLink(inputs, outputs, *trace)
 
+	case baosInputs == 1 && len(inputs) == 1 && inputs[0].Scheme == "baos_auto":
+		runAuto(inputs[0], outputs, *trace)
+
 	case baosInputs == 1 && len(inputs) == 1:
 		runBAOS(inputs[0], outputs)
 
 	default:
-		log.Fatal("BAOS mode takes one baos input and no other")
+		log.Fatal("BAOS mode takes one baos or baos_auto input and no other")
 	}
 }
 
@@ -201,7 +218,7 @@ func runLink(inputs, outputs specs, trace bool) {
 	)
 
 	for i, spec := range servers {
-		addr, list := serveKNXIP(bus, spec, lineAddr, defaultTunnels, trace)
+		addr, list := serveKNXIP(func(addr cemi.IndividualAddr) link.Link { return bus.Attach(addr) }, spec, lineAddr, defaultTunnels, trace)
 		if i == 0 {
 			alias, tunnels = addr, list
 		}
@@ -238,7 +255,7 @@ func runLink(inputs, outputs specs, trace bool) {
 }
 
 // serveKNXIP starts a tunnelling server of a knxip output and returns its address and tunnels.
-func serveKNXIP(bus *mock.Bus, spec *gateway.Spec, lineAddr cemi.IndividualAddr, defaultTunnels []cemi.IndividualAddr, trace bool) (cemi.IndividualAddr, []cemi.IndividualAddr) {
+func serveKNXIP(attach func(cemi.IndividualAddr) link.Link, spec *gateway.Spec, lineAddr cemi.IndividualAddr, defaultTunnels []cemi.IndividualAddr, trace bool) (cemi.IndividualAddr, []cemi.IndividualAddr) {
 	ifi, err := gateway.Interface(spec.Target)
 	check(err)
 
@@ -275,7 +292,7 @@ func serveKNXIP(bus *mock.Bus, spec *gateway.Spec, lineAddr cemi.IndividualAddr,
 
 	config := knxip.TunnelServerConfig{
 		Server: knxnet.ServerConfig{Device: info, Tunnels: tunnels},
-		Attach: func(addr cemi.IndividualAddr) link.Link { return bus.Attach(addr) },
+		Attach: attach,
 		Log:    log.Printf,
 	}
 
@@ -409,52 +426,64 @@ func runBAOS(input *gateway.Spec, outputs specs) {
 	c, err := gateway.OpenBAOS(input)
 	check(err)
 
-	hub := gateway.NewBAOSHub(c)
+	hub := gateway.NewBAOSHub()
+	gone := hub.Use(c)
 	describe(c)
 
 	for _, out := range outputs {
 		switch out.Scheme {
 		case "baos":
-			port, err := out.Int("port", gateway.BAOSPort)
-			check(err)
-			check(out.Unused())
-
-			l, err := gateway.ListenBAOS(out.Target, port)
-			check(err)
-
-			log.Printf("Serving the ObjectServer at %v", l.Addr())
-
-			go func() { log.Fatal(gateway.ServeBAOS(l, hub)) }()
+			serveBAOS(out, hub)
 
 		case "monitor":
 			check(out.Unused())
-
-			indications, _ := hub.Subscribe()
-
-			go func() {
-				for ind := range indications {
-					if ind.Restarted {
-						log.Print("The module restarted")
-						describe(c)
-					}
-
-					for _, v := range ind.Values {
-						log.Printf("DP %d = % x", v.ID, v.Data)
-					}
-
-					for _, item := range ind.Items {
-						log.Printf("Item %d = % x", item.ID, item.Data)
-					}
-				}
-			}()
+			go printIndications(hub)
 
 		default:
 			log.Fatalf("%s: not an output of BAOS mode", out)
 		}
 	}
 
-	<-hub.Done()
+	<-gone
 	log.Fatal("The connection to the ObjectServer closed")
+}
+
+// serveBAOS serves the ObjectServer of the hub at a baos output.
+func serveBAOS(spec *gateway.Spec, hub *gateway.BAOSHub) {
+	port, err := spec.Int("port", gateway.BAOSPort)
+	check(err)
+	check(spec.Unused())
+
+	l, err := gateway.ListenBAOS(spec.Target, port)
+	check(err)
+
+	gateway.CloseOnSignal(l) // removes a unix socket
+	log.Printf("Serving the ObjectServer at %v", l.Addr())
+
+	go func() { log.Fatal(gateway.ServeBAOS(l, hub)) }()
+}
+
+// printIndications prints the datapoint values and server items that the ObjectServer indicates.
+func printIndications(hub *gateway.BAOSHub) {
+	indications, _ := hub.Subscribe()
+
+	for ind := range indications {
+		if ind.Restarted {
+			log.Print("The module restarted")
+
+			if c := hub.Client(); c != nil {
+				describe(c)
+			}
+		}
+
+		for _, v := range ind.Values {
+			log.Printf("DP %d = % x", v.ID, v.Data)
+		}
+
+		for _, item := range ind.Items {
+			log.Printf("Item %d = % x", item.ID, item.Data)
+		}
+	}
 }
 
 // describe prints the identity of the ObjectServer and the number of datapoints.

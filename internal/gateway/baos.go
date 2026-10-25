@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strings"
 	"sync"
 
@@ -91,15 +92,9 @@ func OpenBAOS(spec *Spec) (*baos.Client, error) {
 			return nil, err
 		}
 
-		port, err := serial.Open(spec.Target, baud, serial.ParityEven)
+		conn, err := openBAOSPort(spec.Target, baud)
 		if err != nil {
 			return nil, err
-		}
-
-		conn := ft12.NewConn(port, ft12.DefaultConnConfig)
-		if err := conn.Reset(); err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("resetting the module on %s: %v", spec.Target, err)
 		}
 
 		t, closer = conn, conn
@@ -119,6 +114,38 @@ func OpenBAOS(spec *Spec) (*baos.Client, error) {
 	}
 
 	return c, nil
+}
+
+// OpenBAOSPort opens the ObjectServer of a serial module, which it switches to ObjectServer mode.
+// Closing the returned closer closes the port; the module stays in ObjectServer mode.
+func OpenBAOSPort(port string, baud int) (*baos.Client, io.Closer, error) {
+	conn, err := openBAOSPort(port, baud)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	c, err := baos.NewClient(conn, baos.DefaultConfig)
+	if err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("opening the ObjectServer on %s: %v", port, err)
+	}
+
+	return c, conn, nil
+}
+
+func openBAOSPort(name string, baud int) (*ft12.Conn, error) {
+	port, err := serial.Open(name, baud, serial.ParityEven)
+	if err != nil {
+		return nil, err
+	}
+
+	conn := ft12.NewConn(port, ft12.DefaultConnConfig)
+	if err := conn.Reset(); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("resetting the module on %s: %v", name, err)
+	}
+
+	return conn, nil
 }
 
 // baosConn is a client connection to an ObjectServer over TCP.
@@ -158,18 +185,28 @@ func (c *baosConn) Inbound() <-chan []byte { return c.inbound }
 
 func (c *baosConn) Close() error { return c.conn.Close() }
 
-// A BAOSHub shares an ObjectServer between several users: each gets all indications.
+// A BAOSHub shares an ObjectServer between several users: each gets all indications. The
+// ObjectServer may change, e.g. while its module is in data link layer mode the hub has none.
 type BAOSHub struct {
-	Client *baos.Client
-
-	mu   sync.Mutex
-	subs map[chan baos.Indication]bool
-	done chan struct{}
+	mu     sync.Mutex
+	client *baos.Client
+	gone   chan struct{} // closed when client goes
+	subs   map[chan baos.Indication]bool
 }
 
-// NewBAOSHub reads the indications of c until its transport closes.
-func NewBAOSHub(c *baos.Client) *BAOSHub {
-	h := &BAOSHub{Client: c, subs: map[chan baos.Indication]bool{}, done: make(chan struct{})}
+// NewBAOSHub returns a hub without an ObjectServer.
+func NewBAOSHub() *BAOSHub {
+	return &BAOSHub{subs: map[chan baos.Indication]bool{}}
+}
+
+// Use makes c the ObjectServer of the hub until its transport closes, which closes the returned
+// channel and the connections of the TCP clients that came meanwhile.
+func (h *BAOSHub) Use(c *baos.Client) <-chan struct{} {
+	gone := make(chan struct{})
+
+	h.mu.Lock()
+	h.client, h.gone = c, gone
+	h.mu.Unlock()
 
 	go func() {
 		for ind := range c.Indications() {
@@ -183,14 +220,38 @@ func NewBAOSHub(c *baos.Client) *BAOSHub {
 			h.mu.Unlock()
 		}
 
-		close(h.done)
+		h.release(c)
+		close(gone)
 	}()
 
-	return h
+	return gone
 }
 
-// Subscribe returns a channel of the indications from now on and a function that ends the
-// subscription.
+// release takes c from the hub at once, before its transport finishes closing.
+func (h *BAOSHub) release(c *baos.Client) {
+	h.mu.Lock()
+	if h.client == c {
+		h.client = nil
+	}
+	h.mu.Unlock()
+}
+
+// current returns the ObjectServer and the channel that closes when it goes, or nil.
+func (h *BAOSHub) current() (*baos.Client, <-chan struct{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.client, h.gone
+}
+
+// Client returns the ObjectServer, or nil.
+func (h *BAOSHub) Client() *baos.Client {
+	c, _ := h.current()
+	return c
+}
+
+// Subscribe returns a channel of the indications from now on, of this ObjectServer and the next
+// ones, and a function that ends the subscription.
 func (h *BAOSHub) Subscribe() (<-chan baos.Indication, func()) {
 	sub := make(chan baos.Indication, 32)
 
@@ -205,11 +266,9 @@ func (h *BAOSHub) Subscribe() (<-chan baos.Indication, func()) {
 	}
 }
 
-// Done is closed when the connection to the ObjectServer closes.
-func (h *BAOSHub) Done() <-chan struct{} { return h.done }
-
-// ServeBAOS serves the ObjectServer of the hub over TCP, like an IP BAOS: the requests of all
-// clients go to the server one at a time, and every client gets the indications.
+// ServeBAOS serves the ObjectServer of the hub over TCP or a unix socket, like an IP BAOS: the
+// requests of all clients go to the server one at a time, and every client gets the indications.
+// While the hub has no ObjectServer, clients are turned away.
 func ServeBAOS(l net.Listener, h *BAOSHub) error {
 	for {
 		conn, err := l.Accept()
@@ -224,7 +283,17 @@ func ServeBAOS(l net.Listener, h *BAOSHub) error {
 func serveBAOSConn(conn net.Conn, h *BAOSHub) {
 	defer conn.Close()
 
-	peer := conn.RemoteAddr()
+	peer := "on " + conn.LocalAddr().String() // a unix socket client has no address
+	if addr, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+		peer = addr.String()
+	}
+
+	c, gone := h.current()
+	if c == nil {
+		log.Printf("ObjectServer client %v turned away: the module is in data link layer mode", peer)
+		return
+	}
+
 	log.Printf("ObjectServer client %v connected", peer)
 
 	var writeMu sync.Mutex
@@ -257,6 +326,12 @@ func serveBAOSConn(conn net.Conn, h *BAOSHub) {
 					return
 				}
 
+			case <-gone:
+				log.Printf("ObjectServer client %v: the ObjectServer went away", peer)
+				conn.Close()
+
+				return
+
 			case <-stop:
 				return
 			}
@@ -275,7 +350,7 @@ func serveBAOSConn(conn net.Conn, h *BAOSHub) {
 			break
 		}
 
-		res, err := h.Client.Request(req)
+		res, err := c.Request(req)
 		if err != nil {
 			log.Printf("ObjectServer client %v: request % x: %v", peer, req, err)
 			continue
@@ -289,9 +364,18 @@ func serveBAOSConn(conn net.Conn, h *BAOSHub) {
 	log.Printf("ObjectServer client %v disconnected", peer)
 }
 
-// ListenBAOS listens on the IPv4 address of the network interface (all interfaces if empty).
-func ListenBAOS(iface string, port int) (net.Listener, error) {
-	ifi, err := Interface(iface)
+// ListenBAOS listens on the IPv4 address of the network interface (all interfaces if empty), or on
+// a unix socket if target is a path, which it replaces.
+func ListenBAOS(target string, port int) (net.Listener, error) {
+	if strings.Contains(target, "/") {
+		if info, err := os.Stat(target); err == nil && info.Mode()&os.ModeSocket != 0 {
+			os.Remove(target)
+		}
+
+		return net.Listen("unix", target)
+	}
+
+	ifi, err := Interface(target)
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +384,7 @@ func ListenBAOS(iface string, port int) (net.Listener, error) {
 	if ifi != nil {
 		ip := interfaceIPv4(ifi)
 		if ip == nil {
-			return nil, fmt.Errorf("%s has no IPv4 address", iface)
+			return nil, fmt.Errorf("%s has no IPv4 address", target)
 		}
 
 		host = ip.String()

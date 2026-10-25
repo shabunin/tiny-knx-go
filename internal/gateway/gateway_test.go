@@ -118,7 +118,10 @@ func TestServeBAOS(t *testing.T) {
 	}
 	defer l.Close()
 
-	go ServeBAOS(l, NewBAOSHub(c))
+	hub := NewBAOSHub()
+	hub.Use(c)
+
+	go ServeBAOS(l, hub)
 
 	spec, _ := ParseSpec("baos:tcp://" + l.Addr().String())
 
