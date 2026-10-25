@@ -30,6 +30,12 @@ type Transport interface {
 	Inbound() <-chan []byte
 }
 
+// A Resetter is a Transport that reports when the module restarted, e.g. ft12.Conn. A module
+// restarts in its default mode, and the Client switches it back to ObjectServer mode.
+type Resetter interface {
+	Resets() <-chan struct{}
+}
+
 // Config configures a Client.
 type Config struct {
 	// Version is the protocol version of the server. Zero detects it.
@@ -112,6 +118,10 @@ func NewClient(t Transport, config Config) (*Client, error) {
 
 	go c.serve()
 
+	if r, ok := t.(Resetter); ok {
+		go c.restore(r.Resets())
+	}
+
 	if err := c.detect(); err != nil {
 		return nil, err
 	}
@@ -164,6 +174,22 @@ func (c *Client) detect() error {
 
 	return ErrNoServer
 }
+
+// restore switches the module back to ObjectServer mode after each restart, e.g. when ETS
+// restarts it after a download. Each module ignores the message of the other kind.
+func (c *Client) restore(resets <-chan struct{}) {
+	for range resets {
+		time.Sleep(restartDelay)
+
+		c.mu.Lock()
+		c.t.Send(cemiObjectServerMode)
+		c.t.Send(emiNormalMode)
+		c.mu.Unlock()
+	}
+}
+
+// restartDelay lets the module finish starting before it is switched.
+const restartDelay = 100 * time.Millisecond
 
 // Version returns the protocol version of the server.
 func (c *Client) Version() Version {
@@ -249,20 +275,37 @@ func (c *Client) request(v Version, req []byte, timeout time.Duration) (Message,
 }
 
 // Request sends a raw ObjectServer request and returns the raw response, e.g. for a proxy that
-// passes the messages of its own clients.
+// passes the messages of its own clients. A request in the format of the other protocol version
+// fails at once with ErrMalformed, as the server would ignore it: clients that detect the version
+// ask in both.
 func (c *Client) Request(req []byte) ([]byte, error) {
-	if len(req) < 2 || req[0] != MainService {
+	if len(req) < 2 || req[0] != MainService || !c.Version().fits(req) {
 		return nil, ErrMalformed
 	}
 
 	return c.exchange(req, c.config.Timeout)
 }
 
-// exchange sends a request and waits for the response with its subservice.
+// exchange sends a request and waits for the response with its subservice. If the server does not
+// answer, the module may have restarted in its default mode without telling (not every module sends
+// a reset indication): exchange switches it to ObjectServer mode and tries once more.
 func (c *Client) exchange(req []byte, timeout time.Duration) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	res, err := c.send(req, timeout)
+	if err != ErrTimeout || c.Version() == 0 {
+		return res, err
+	}
+
+	c.t.Send(cemiObjectServerMode)
+	c.t.Send(emiNormalMode)
+	time.Sleep(restartDelay)
+
+	return c.send(req, timeout)
+}
+
+func (c *Client) send(req []byte, timeout time.Duration) ([]byte, error) {
 	select {
 	case <-c.responses:
 	default:

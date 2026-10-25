@@ -373,4 +373,63 @@ func TestClientRawRequest(t *testing.T) {
 	if _, err := c.Request([]byte{0x11, 0x00}); err != ErrMalformed {
 		t.Errorf("not an ObjectServer message: %v", err)
 	}
+
+	// A version 1 request, which a version 2 server would ignore.
+	if _, err := c.Request([]byte{0xf0, 0x01, 0x03, 0x01}); err != ErrMalformed {
+		t.Errorf("version 1 request: %v", err)
+	}
+}
+
+// resettingServer reports restarts like ft12.Conn.
+type resettingServer struct {
+	*fakeServer
+	resets chan struct{}
+}
+
+func (s resettingServer) Resets() <-chan struct{} { return s.resets }
+
+func TestClientRestoresModeAfterRestart(t *testing.T) {
+	for _, v := range []Version{Version1, Version2} {
+		server := resettingServer{newFakeServer(v), make(chan struct{}, 1)}
+
+		c, err := NewClient(server, Config{Version: v, Timeout: 200 * time.Millisecond})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// The module restarts in link layer mode, e.g. after a download by ETS.
+		c.mu.Lock()
+		server.linkMode = true
+		c.mu.Unlock()
+		server.resets <- struct{}{}
+
+		deadline := time.Now().Add(2 * time.Second)
+
+		for {
+			if _, err := c.ServerItems(ItemFirmwareVersion, 1); err == nil {
+				break
+			}
+
+			if time.Now().After(deadline) {
+				t.Fatalf("v%d: no ObjectServer after the restart", v)
+			}
+		}
+	}
+}
+
+func TestClientRestoresModeWithoutIndication(t *testing.T) {
+	server := newFakeServer(Version1)
+
+	c, err := NewClient(server, Config{Version: Version1, Timeout: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c.mu.Lock()
+	server.linkMode = true // restarted without a reset indication
+	c.mu.Unlock()
+
+	if _, err := c.ServerItems(ItemFirmwareVersion, 1); err != nil {
+		t.Errorf("after the restart: %v", err)
+	}
 }

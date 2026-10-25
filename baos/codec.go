@@ -19,6 +19,32 @@ func (v Version) headerSize() int {
 	return 6
 }
 
+// fits reports whether a request may be of version v. The requests that read a range have a fixed
+// length, which differs between the versions; a server ignores those of the other version.
+func (v Version) fits(req []byte) bool {
+	if len(req) < 2 {
+		return false
+	}
+
+	want := v.headerSize()
+
+	switch req[1] {
+	case GetServerItem, GetDatapointDescription, GetDescriptionString, GetParameterByte:
+	case GetDatapointValue:
+		if v == Version2 {
+			want++ // filter
+		}
+	case GetDatapointDescription2: // SetParameterByte in version 2
+		if v == Version2 {
+			return len(req) >= want
+		}
+	default:
+		return len(req) >= want
+	}
+
+	return len(req) == want
+}
+
 func appendWord(b []byte, v Version, x uint16) []byte {
 	if v == Version1 {
 		return append(b, byte(x))
