@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -204,7 +205,15 @@ func startServer(t *testing.T, hub *gateway.BAOSHub) *Client {
 	}
 	t.Cleanup(func() { l.Close() })
 
-	go NewServer(hub, map[string]uint16{"temperature": 2}).Serve(l)
+	names := filepath.Join(t.TempDir(), "names.json")
+	os.WriteFile(names, []byte(`{"temperature": 2}`), 0o644)
+
+	server, err := NewServer(hub, names)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	go server.Serve(l)
 
 	c, err := Dial(l.Addr().String())
 	if err != nil {
@@ -273,7 +282,7 @@ func TestServer(t *testing.T) {
 
 	want := []map[string]any{
 		{"id": 1.0, "value": false, "raw": "AA=="},
-		{"id": 2.0, "value": 21.0, "raw": "DBo="},
+		{"id": 2.0, "name": "temperature", "value": 21.0, "raw": "DBo="},
 		{"id": 3.0, "value": map[string]any{"day": 0.0, "hour": 0.0, "minutes": 0.0, "seconds": 0.0}, "valid": false, "raw": "AAAA"},
 	}
 
@@ -299,7 +308,7 @@ func TestServer(t *testing.T) {
 		t.Errorf("writes %+v", writes)
 	}
 
-	if b := broadcast(t, c); b != `datapoint value [{"id":2,"value":21.5,"raw":"DDM="},{"id":1,"value":true,"raw":"AQ=="}]` {
+	if b := broadcast(t, c); b != `datapoint value [{"id":2,"name":"temperature","value":21.5,"raw":"DDM="},{"id":1,"value":true,"raw":"AQ=="}]` {
 		t.Errorf("broadcast %s", b)
 	}
 
@@ -333,6 +342,24 @@ func TestServer(t *testing.T) {
 
 	if read.ID != 2 || read.Command != baos.CommandRead || len(read.Data) != 2 {
 		t.Errorf("read %+v", read)
+	}
+
+	call(t, c, "set name", map[string]any{"id": 1, "name": "light"}, &ok)
+
+	var name string
+	call(t, c, "get name", "light", &name)
+
+	var light map[string]any
+	call(t, c, "get stored", "light", &light)
+
+	if name != "light" || light["name"] != "light" || light["id"] != 1.0 {
+		t.Errorf("name %q, stored %v", name, light)
+	}
+
+	call(t, c, "remove name", "light", &ok)
+
+	if _, err := c.Call("get value", "light"); err == nil {
+		t.Error("removed name still works")
 	}
 
 	for _, tt := range []struct {

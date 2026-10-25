@@ -36,7 +36,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -94,7 +93,7 @@ BAOS mode outputs:
   baos:[IFACE][?port=12004]         ObjectServer over TCP, like an IP BAOS
   baos:/PATH                        ObjectServer over a unix socket, the same frames
   json:/PATH[?names=FILE]           the datapoints as JSON on a unix socket, like dobaos (baosctl);
-                                    FILE names datapoints: {"room_temperature": 1, ...}
+                                    FILE keeps the names of datapoints: {"room_temperature": 1}
   monitor                           print the datapoint value indications
 
 Auto mode input:
@@ -473,17 +472,8 @@ func serveBAOS(spec *gateway.Spec, hub *gateway.BAOSHub) {
 
 // serveJSON serves the datapoints of the hub as JSON on the unix socket of a json output.
 func serveJSON(spec *gateway.Spec, hub *gateway.BAOSHub) {
-	var names map[string]uint16
-
-	if file := spec.Get("names", ""); file != "" {
-		data, err := os.ReadFile(file)
-		check(err)
-
-		if err := json.Unmarshal(data, &names); err != nil {
-			log.Fatalf("%s: %v", file, err)
-		}
-	}
-
+	server, err := sdk.NewServer(hub, spec.Get("names", ""))
+	check(err)
 	check(spec.Unused())
 
 	if !strings.Contains(spec.Target, "/") {
@@ -496,7 +486,7 @@ func serveJSON(spec *gateway.Spec, hub *gateway.BAOSHub) {
 	gateway.CloseOnSignal(l)
 	log.Printf("Serving the datapoints as JSON at %v", l.Addr())
 
-	go serve(func() error { return sdk.NewServer(hub, names).Serve(l) })
+	go serve(func() error { return server.Serve(l) })
 }
 
 // serve runs a server until its listener fails. A listener that closes at exit, before the module

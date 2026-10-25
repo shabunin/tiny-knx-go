@@ -29,7 +29,7 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
  `serial` | Opens serial ports on Linux with the standard library only
  `cmd/knxmon` | Bus tool over kBerry, TP-UART, KNXnet/IP tunnel or routing: monitor, group reads/writes, line scan, device properties, KNXnet/IP search
  `cmd/knxgw` | Gateway between media, like ffmpeg: inputs kBerry/EMI2, TP-UART, tunnel, routing; outputs KNXnet/IP interface, routing, monitor; BAOS mode serves the ObjectServer over TCP like an IP BAOS and the datapoints as JSON like dobaos; baos_auto switches a module between both modes
- `cmd/baosctl` | Command line client of the JSON datapoints of knxgw, like dobaos-tool
+ `cmd/baosctl` | REPL for the JSON datapoints of knxgw, a port of dobaos.tool
  `cmd/knxvbus` | Virtual KNX line with devices, served as a KNXnet/IP interface that ETS finds and tunnels to; simulated switch, dimmer, push buttons, thermostat and heating
  `examples/pico-kberry` | Switch actuator: Pico + kBerry, LED on 1/1/1, status on 1/1/2, programming button
 
@@ -124,8 +124,8 @@ knxgw -i baos_auto:/dev/ttyAMA0 -o knxip:wlan0 -o baos:wlan0 -o baos:/run/knxgw.
 [dobaos](https://github.com/cougalix/dobaos), without Redis: one JSON object per line each way,
 and the response repeats the `id` of the request. Values are converted by their DPT, in the formats
 of dobaos (DPT 1 `true`, DPT 9 `21.5`, DPT 10 `{"day":1,"hour":12,"minutes":30,"seconds":0}`, ...),
-with the data in base64 as `raw`. `?names=FILE` names datapoints (`{"room_temperature": 8}`), and
-requests take the names instead of IDs.
+with the data in base64 as `raw`. `?names=FILE` keeps names of datapoints (`{"room_temperature": 8}`),
+which requests take instead of IDs; the methods `set name`, `get name` and `remove name` change it.
 
 ```text
 -> {"id": 1, "method": "get value", "payload": [1, "room_temperature"]}
@@ -142,20 +142,27 @@ requests take the names instead of IDs.
 | `put value` | the same | set without sending |
 | `read value` | IDs | send GroupValueRead; the responses come as broadcasts |
 | `get programming mode`, `set programming mode` | `true`/`false` | |
+| `get name`, `set name`, `remove name` | ID or name; `{"id", "name"}`; IDs or names | |
 | `get server items`, `version`, `reset` | | `reset` reloads the datapoints |
 
 Errors are dobaos's codes, e.g. `{"id": 2, "method": "error", "payload": "ERR_DATAPOINT_NOT_FOUND"}`;
 in `baos_auto` mode, while a tunnel is open, `ERR_NO_OBJECT_SERVER`. Every client gets the
 broadcasts `datapoint value` (from the bus, and after `set value`/`put value`) and `server item`.
 
-`baosctl` is the command line client, like dobaos-tool:
+`baosctl` is a REPL for it, a Go port of dobaos.tool with its commands and output: `watch 1: red`
+colors a datapoint's values (or hides them), `name 8: temperature` names one (kept in the names
+file). With arguments it runs one command, e.g. `baosctl get 1 2`; `rlwrap baosctl` adds history.
 
-```sh
-baosctl -s /run/knxgw.json description      # or BAOSCTL_SOCKET=/run/knxgw.json
-baosctl get 1-3 room_temperature
-baosctl set 1=true 8=21.5 '9={"day":1,"hour":12,"minutes":30,"seconds":0}'
-baosctl watch
-baosctl                                     # commands from standard input, with broadcasts
+```text
+$ baosctl -s /run/knxgw.json
+baos> description *
+#8 <temperature>, dpt9, 16 bits, prio: low, flags: [C-WT-]
+baos> set [temperature: 22.5, 1: true]
+01:01:30.706,    id: 8 <temperature>, value: 22.5, raw: [12,101] [0x0c65]
+baos> set 9: {day: 1, hour: 12, minutes: 30, seconds: 0}
+baos> raw 6: 0x1234
+baos> get *
+baos> progmode true
 ```
 
 ETS reaches a kBerry itself through the tunnel of its address: the module answers frames to its

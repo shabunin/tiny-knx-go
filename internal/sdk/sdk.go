@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"slices"
 	"sync"
 
@@ -61,6 +62,7 @@ type Description struct {
 // or were not sent to it: the initial ones, which are zero, and those set with "put value".
 type Value struct {
 	ID      uint16 `json:"id"`
+	Name    string `json:"name,omitempty"`
 	Value   any    `json:"value,omitempty"`
 	Raw     []byte `json:"raw"` // base64 in JSON
 	Valid   *bool  `json:"valid,omitempty"`
@@ -117,9 +119,10 @@ type Hub interface {
 
 // A Server serves the datapoints of the ObjectServer of a hub. Requests go to it one at a time.
 type Server struct {
-	hub     Hub
-	names   map[string]uint16
-	idNames map[uint16]string
+	hub       Hub
+	namesFile string
+	names     map[string]uint16
+	idNames   map[uint16]string
 
 	mu           sync.Mutex
 	client       *baos.Client // the one that the descriptions are of
@@ -130,18 +133,56 @@ type Server struct {
 	conns   map[*conn]bool
 }
 
-// NewServer returns a server of the hub. names gives names to datapoints, which requests may use
-// instead of IDs.
-func NewServer(hub Hub, names map[string]uint16) *Server {
-	s := &Server{hub: hub, names: names, idNames: map[uint16]string{}, conns: map[*conn]bool{}}
+// NewServer returns a server of the hub. Datapoints may have names, which requests may use
+// instead of IDs; if namesFile is set, the names are read from it, {"name": ID, ...}, and the
+// methods "set name" and "remove name" write it.
+func NewServer(hub Hub, namesFile string) (*Server, error) {
+	s := &Server{hub: hub, namesFile: namesFile, names: map[string]uint16{}, idNames: map[uint16]string{}, conns: map[*conn]bool{}}
 
-	for name, id := range names {
-		s.idNames[id] = name
+	if namesFile != "" {
+		data, err := os.ReadFile(namesFile)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+
+		if len(data) > 0 {
+			if err := json.Unmarshal(data, &s.names); err != nil {
+				return nil, fmt.Errorf("%s: %v", namesFile, err)
+			}
+		}
+
+		for name, id := range s.names {
+			s.idNames[id] = name
+		}
 	}
 
 	go s.broadcastIndications()
 
-	return s
+	return s, nil
+}
+
+// setName gives a datapoint a name, or takes its name if name is empty. It is called with mu held.
+func (s *Server) setName(id uint16, name string) error {
+	if old, ok := s.idNames[id]; ok {
+		delete(s.names, old)
+		delete(s.idNames, id)
+	}
+
+	if name != "" {
+		if other, ok := s.names[name]; ok {
+			delete(s.idNames, other)
+		}
+
+		s.names[name], s.idNames[id] = id, name
+	}
+
+	if s.namesFile == "" {
+		return nil
+	}
+
+	data, _ := json.MarshalIndent(s.names, "", "  ")
+
+	return os.WriteFile(s.namesFile, append(data, '\n'), 0o644)
 }
 
 // Serve accepts clients on l until it closes.
@@ -364,6 +405,57 @@ func (s *Server) handle(req Request) (any, error) {
 
 		return true, c.SetServerItems(baos.Item{ID: baos.ItemProgrammingMode, Data: []byte{bit(on)}})
 
+	case "get name":
+		id, err := s.id(payload)
+		if err != nil {
+			return nil, err
+		}
+
+		if name, ok := s.idNames[id]; ok {
+			return name, nil
+		}
+
+		return nil, nil
+
+	case "set name":
+		list := []any{payload}
+		if p, ok := payload.([]any); ok {
+			list = p
+		}
+
+		for _, item := range list {
+			m, ok := item.(map[string]any)
+			name, isString := m["name"].(string)
+			if !ok || !isString || name == "" {
+				return nil, ErrPayload
+			}
+
+			id, err := s.id(m["id"])
+			if err != nil {
+				return nil, err
+			}
+
+			if err := s.setName(id, name); err != nil {
+				return nil, err
+			}
+		}
+
+		return true, nil
+
+	case "remove name":
+		ids, _, err := s.ids(payload)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, id := range ids {
+			if err := s.setName(id, ""); err != nil {
+				return nil, err
+			}
+		}
+
+		return true, nil
+
 	case "get server items":
 		got, err := c.ServerItems(1, 17)
 		if err != nil {
@@ -410,7 +502,7 @@ func (s *Server) describe(d baos.Description) Description {
 // value converts a value of the server. A value that a client set without sending it is not
 // valid either, so the value is there anyway.
 func (s *Server) value(d baos.Description, v baos.Value) Value {
-	value := Value{ID: v.ID, Value: decodeValue(d, v.Data), Raw: v.Data}
+	value := Value{ID: v.ID, Name: s.idNames[v.ID], Value: decodeValue(d, v.Data), Raw: v.Data}
 	if !v.State.Valid {
 		value.Valid = new(bool)
 	}
@@ -542,13 +634,21 @@ func (s *Server) getValues(c *baos.Client, payload any, stored bool) (any, error
 		}
 	}
 
+	// Names may have changed since.
+	named := func(id uint16) Value {
+		v := s.stored[id]
+		v.Name = s.idNames[id]
+
+		return v
+	}
+
 	if one {
-		return s.stored[ids[0]], nil
+		return named(ids[0]), nil
 	}
 
 	out := make([]Value, len(ids))
 	for i, id := range ids {
-		out[i] = s.stored[id]
+		out[i] = named(id)
 	}
 
 	return out, nil
@@ -604,7 +704,7 @@ func (s *Server) setValues(c *baos.Client, payload any, command baos.Command) (a
 		}
 
 		sets = append(sets, baos.SetValue{ID: id, Command: command, Data: data})
-		values = append(values, Value{ID: id, Value: decodeValue(d, data), Raw: data, Success: ptr(true)})
+		values = append(values, Value{ID: id, Name: s.idNames[id], Value: decodeValue(d, data), Raw: data, Success: ptr(true)})
 	}
 
 	// The server takes commands in the order of their IDs.
