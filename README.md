@@ -8,30 +8,65 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Packages
 
- Package | Description
----------|------------------------------------------------------------------
- `cemi`  | cEMI frames: L_Data, L_Raw, L_Busmon, addresses, control fields, TPDU/APCI
- `dpt`   | Datapoint types (DPT 1, 3, 5–14, 16–18, 20, 28, 232, 242, 251)
- `apdu`  | Application layer services (group values, properties, memory, device descriptor…)
- `transport` | Transport connections: state machine without I/O, and a Client for tools
- `device` | A KNX device: group objects with flags, programming mode, individual address programming, interface objects and properties, memory services
- `link`  | Interface between the protocol stack and a bus connection
- `link/mock` | In-memory bus for tests
- `link/ft12` | BAOS modules (kBerry) and older EMI2 interfaces over FT1.2 serial, in data link layer mode; the protocol is detected
- `baos` | BAOS mode: the ObjectServer protocol (versions 1 and 2) of Weinzierl modules, whose datapoints ETS configures
- `link/tpuart` | TP-UART2 and NCN5120/5121/5130 transceivers
- `knxnet` | KNXnet/IP packets and the tunnelling client and server state machines, without I/O, with KNX IP Secure sessions
- `secure` | KNX Data Secure (A_SecureService, AES-128 CCM, sync requests) and the cryptography of KNX IP Secure
- `link/knxip` | KNXnet/IP tunnelling client and server, routing and discovery over UDP (uses `net`)
- `ets` | Makes a device programmable by ETS as a System B device (0x07B0): table objects, load state machine, memory, parameters, persistence
- `ets/product` | Describes the ETS product of a device in Go: writes its product database (XML for a .knxprod) and gives the firmware its group objects and parameters
- `mgmt` | Management procedures for tools: line scan, reading all properties of a device
- `serial` | Opens serial ports on Linux with the standard library only
- `cmd/knxmon` | Bus tool over kBerry, TP-UART, KNXnet/IP tunnel or routing: monitor, group reads/writes, line scan, device properties, KNXnet/IP search
- `cmd/knxgw` | Gateway between media, like ffmpeg: inputs kBerry/EMI2, TP-UART, tunnel, routing; outputs KNXnet/IP interface, routing, monitor; BAOS mode serves the ObjectServer over TCP like an IP BAOS and the datapoints as JSON like dobaos; baos_auto switches a module between both modes
- `cmd/baosctl` | REPL for the JSON datapoints of knxgw, a port of dobaos.tool
- `cmd/knxvbus` | Virtual KNX line with devices, served as a KNXnet/IP interface that ETS finds and tunnels to; simulated switch, dimmer, push buttons, thermostat and heating
- `examples/pico-kberry` | Switch actuator: Pico + kBerry, LED on 1/1/1, status on 1/1/2, programming button
+✓ marks the packages whose tests also run under TinyGo on an emulated microcontroller
+(`make check`).
+
+**Protocol core**
+
+| Package | Description | TinyGo |
+| :--- | :--- | :---: |
+| `cemi` | cEMI frames: L_Data, L_Raw, L_Busmon, property services, addresses, control fields, TPDU/APCI | ✓ |
+| `apdu` | Application layer services: group values, properties, memory, device descriptor… | ✓ |
+| `transport` | Transport connections: a state machine without I/O, and a client for tools | ✓ |
+| `dpt` | Datapoint types (DPT 1, 3, 5–14, 16–18, 20, 28, 232, 242, 251) | ✓ |
+| `knxnet` | KNXnet/IP packets, the tunnelling client and server state machines without I/O, KNX IP Secure sessions | ✓ |
+| `secure` | KNX Data Secure (A_SecureService, AES-128 CCM, sync requests) and the cryptography of KNX IP Secure | ✓ |
+
+**Devices and ETS**
+
+| Package | Description | TinyGo |
+| :--- | :--- | :---: |
+| `device` | A KNX device: group objects with flags, programming mode, individual address programming, interface objects and properties, memory services | ✓ |
+| `ets` | Makes a device programmable by ETS as a System B device (07B0): table objects, load state machine, memory, parameters, persistence | ✓ |
+| `ets/product` | Describes the ETS product of a device in Go: writes its product database (XML for a .knxprod) and gives the firmware its group objects and parameters | ✓ |
+| `mgmt` | Management procedures for tools: line scan, reading all properties of a device | ✓ |
+
+**Links to the bus**
+
+| Package | Description | TinyGo |
+| :--- | :--- | :---: |
+| `link` | Interface between the protocol stack and a bus connection | ✓ |
+| `link/mock` | In-memory bus for tests | ✓ |
+| `link/ft12` | BAOS modules (kBerry) and older EMI2 interfaces over FT1.2 serial, in data link layer mode; the protocol is detected, module restarts are survived | ✓ |
+| `link/tpuart` | TP-UART2 and NCN5120/5121/5130 transceivers | ✓ |
+| `link/knxip` | KNXnet/IP tunnelling client and server, routing and discovery over UDP and TCP (uses `net`) | |
+| `baos` | BAOS mode: the ObjectServer protocol (versions 1 and 2) of Weinzierl modules, whose datapoints ETS configures | ✓ |
+| `serial` | Opens serial ports on Linux with the standard library only | |
+
+**Commands** (Linux)
+
+| Command | Description |
+| :--- | :--- |
+| `cmd/knxmon` | Bus tool over kBerry, TP-UART, KNXnet/IP tunnel or routing: monitor, group reads/writes, line scan, device properties and memory, KNXnet/IP search; `-baos` talks to an ObjectServer on a serial port, `tcp://` or `unix:` |
+| `cmd/knxgw` | Gateway between media, like ffmpeg: inputs kBerry/EMI2, TP-UART, tunnel, routing; outputs KNXnet/IP interface, routing, monitor. BAOS mode serves the ObjectServer over TCP or a unix socket like an IP BAOS, and the datapoints as JSON like dobaos; `baos_auto` switches a module between both modes |
+| `cmd/baosctl` | REPL for the JSON datapoints of knxgw, a port of dobaos.tool, with history, line editing and completion |
+| `cmd/knxvbus` | Virtual KNX line with devices, served as a KNXnet/IP interface that ETS finds and tunnels to; simulated switch, dimmer, push buttons, thermostat and heating |
+
+**Internal**, shared by the commands
+
+| Package | Description |
+| :--- | :--- |
+| `internal/gateway` | The media of knxgw and knxvbus: specs, opening lines, bridging, the BAOS hub, the ObjectServer over TCP and unix sockets, switching a module between modes |
+| `internal/sdk` | The JSON API of the datapoints: server, client, values by DPT, names |
+| `internal/vbus` | The simulated installation of knxvbus |
+| `internal/util`, `internal/pretty` | Helpers; printing telegrams for monitors |
+
+**Examples**
+
+| Path | Description |
+| :--- | :--- |
+| `examples/pico-kberry` | Switch actuator: Pico + kBerry, LED on 1/1/1, status on 1/1/2, programming button |
+| `examples/smoke` | Encodes a frame and a value; `make check` builds it for the Pico, ESP32 and ESP32-C3 and runs it on an emulated Cortex-M |
 
 The core packages use no `reflect`, no `net` and no third-party modules. Only `link/knxip`,
 `serial` and the commands use the operating system.
