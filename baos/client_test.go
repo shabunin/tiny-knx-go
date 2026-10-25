@@ -323,7 +323,7 @@ func TestClientIndications(t *testing.T) {
 
 	select {
 	case ind := <-c.Indications():
-		if len(ind.Values) != 1 || ind.Values[0].ID != 2 || !ind.Values[0].State.Updated || ind.Values[0].Data[0] != 1 {
+		if len(ind.Values) != 1 || len(ind.Raw) != 11 || ind.Values[0].ID != 2 || !ind.Values[0].State.Updated || ind.Values[0].Data[0] != 1 {
 			t.Errorf("indication %+v", ind)
 		}
 
@@ -356,5 +356,21 @@ func TestClientRangeLimits(t *testing.T) {
 
 	if _, err := c.Descriptions(251, 1); err != ErrBadID {
 		t.Errorf("beyond the last datapoint: %v", err)
+	}
+}
+
+func TestClientRawRequest(t *testing.T) {
+	c, err := NewClient(newFakeServer(Version2), Config{Version: Version2})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := c.Request([]byte{0xf0, 0x01, 0x00, 0x03, 0x00, 0x01})
+	if err != nil || !bytes.Equal(res, []byte{0xf0, 0x81, 0x00, 0x03, 0x00, 0x01, 0x00, 0x03, 0x01, 0x21}) {
+		t.Errorf("Request: % x, %v", res, err)
+	}
+
+	if _, err := c.Request([]byte{0x11, 0x00}); err != ErrMalformed {
+		t.Errorf("not an ObjectServer message: %v", err)
 	}
 }

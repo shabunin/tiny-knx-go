@@ -427,6 +427,46 @@ func TestRouterBusy(t *testing.T) {
 	}
 }
 
+// A gateway passes frames of other lines on with their source address; their echo through the
+// multicast loopback must not come back as frames from the network.
+func TestRouterEcho(t *testing.T) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewRouter(conn, conn.LocalAddr(), RouterConfig{Address: cemi.NewIndividualAddr3(1, 0, 1)}) // sends to itself
+	defer r.Close()
+
+	req := groupWrite(1)
+	req.Source = cemi.NewIndividualAddr3(1, 1, 5)
+
+	if err := r.Send(req); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ind := <-r.Inbound():
+		t.Errorf("Received own frame %+v", ind.LData)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The same frame from another router is a new one.
+	other, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+
+	other.WriteTo(knxnet.Encode(&knxnet.RoutingIndication{Message: &cemi.LDataInd{LData: req.LData}}), conn.LocalAddr())
+
+	select {
+	case <-r.Inbound():
+	case <-time.After(time.Second):
+		t.Error("Frame of another router not received")
+	}
+}
+
 // TestRouterMulticast uses the real routing group. It needs a network interface with multicast.
 func TestRouterMulticast(t *testing.T) {
 	a, err := ListenRouter(nil, RouterConfig{Address: cemi.NewIndividualAddr3(1, 0, 1)})

@@ -57,6 +57,7 @@ const detectTimeout = 500 * time.Millisecond
 type Indication struct {
 	Values []Value
 	Items  []Item
+	Raw    []byte // the message as received
 }
 
 // A Client talks to an ObjectServer. It sends one request at a time.
@@ -176,6 +177,7 @@ func (c *Client) Indications() <-chan Indication {
 }
 
 func (c *Client) serve() {
+	defer close(c.responses)
 	defer close(c.indications)
 
 	for payload := range c.t.Inbound() {
@@ -218,7 +220,7 @@ func (c *Client) indicate(payload []byte) {
 		return
 	}
 
-	var ind Indication
+	ind := Indication{Raw: payload}
 
 	if m.Service == DatapointValueIndication {
 		ind.Values, err = m.Values(v)
@@ -238,6 +240,26 @@ func (c *Client) indicate(payload []byte) {
 
 // request sends a request and returns its response.
 func (c *Client) request(v Version, req []byte, timeout time.Duration) (Message, error) {
+	payload, err := c.exchange(req, timeout)
+	if err != nil {
+		return Message{}, err
+	}
+
+	return Parse(v, payload)
+}
+
+// Request sends a raw ObjectServer request and returns the raw response, e.g. for a proxy that
+// passes the messages of its own clients.
+func (c *Client) Request(req []byte) ([]byte, error) {
+	if len(req) < 2 || req[0] != MainService {
+		return nil, ErrMalformed
+	}
+
+	return c.exchange(req, c.config.Timeout)
+}
+
+// exchange sends a request and waits for the response with its subservice.
+func (c *Client) exchange(req []byte, timeout time.Duration) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -247,7 +269,7 @@ func (c *Client) request(v Version, req []byte, timeout time.Duration) (Message,
 	}
 
 	if err := c.t.Send(req); err != nil {
-		return Message{}, err
+		return nil, err
 	}
 
 	timer := time.NewTimer(timeout)
@@ -257,18 +279,15 @@ func (c *Client) request(v Version, req []byte, timeout time.Duration) (Message,
 		select {
 		case payload, open := <-c.responses:
 			if !open {
-				return Message{}, ErrClosed
+				return nil, ErrClosed
 			}
 
-			m, err := Parse(v, payload)
-			if err != nil || m.Service != req[1]|ResponseFlag {
-				continue
+			if payload[1] == req[1]|ResponseFlag {
+				return payload, nil
 			}
-
-			return m, nil
 
 		case <-timer.C:
-			return Message{}, ErrTimeout
+			return nil, ErrTimeout
 		}
 	}
 }

@@ -107,6 +107,14 @@ object table is ignored.
    values, commands, parameters, indications; version detection and switching from link layer
    mode), `knxmon -baos`. `link/ft12` restores the module's mode on `Close`. Tested with a kBerry
    (2.0) and a BAOS Module 820 (1.x).
+10. ✅ `cmd/knxgw`: one gateway for all media (`internal/gateway`, shared with knxvbus). Link mode
+    bridges any number of inputs (ft12, tpuart, tunnel, routing) and serves them as KNXnet/IP
+    tunnelling servers, routing or a monitor; the serial module can be hosted as a device. BAOS
+    mode serves the ObjectServer over TCP (port 12004, frames 06 20 F0 80) to several clients,
+    each of which gets all indications, and connects to one as a client (`baos:tcp://`). Tested
+    with a kBerry on a Raspberry Pi over Wi-Fi in both modes, and with a second gateway chained to
+    it by tunnel that serves the line again by routing. Next: the ObjectServer in KNXnet/IP search
+    responses (manufacturer DIB 0xFE, 00C5, F0 20) and over UDP (connection type 0xF0).
 
 ## Hardware notes
 

@@ -36,27 +36,22 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/shabunin/tiny-knx-go/apdu"
 	"github.com/shabunin/tiny-knx-go/cemi"
 	"github.com/shabunin/tiny-knx-go/device"
 	"github.com/shabunin/tiny-knx-go/ets"
-	"github.com/shabunin/tiny-knx-go/internal/pretty"
+	"github.com/shabunin/tiny-knx-go/internal/gateway"
 	"github.com/shabunin/tiny-knx-go/internal/vbus"
 	"github.com/shabunin/tiny-knx-go/knxnet"
 	"github.com/shabunin/tiny-knx-go/link"
-	"github.com/shabunin/tiny-knx-go/link/ft12"
 	"github.com/shabunin/tiny-knx-go/link/knxip"
 	"github.com/shabunin/tiny-knx-go/link/mock"
-	"github.com/shabunin/tiny-knx-go/secure"
-	"github.com/shabunin/tiny-knx-go/serial"
 )
 
 // The manufacturer of the hosted devices: 0x00FA, as in the demo products of the thelsing stack.
@@ -107,7 +102,7 @@ func main() {
 	info := knxnet.DeviceInfo{
 		Medium:         0x02, // TP1
 		Address:        parseAddress(*address),
-		SerialNumber:   interfaceSerial(*port),
+		SerialNumber:   gateway.InterfaceSerial(manufacturer, *port),
 		MulticastGroup: knxnet.RoutingGroup,
 		Name:           *name,
 	}
@@ -124,8 +119,8 @@ func main() {
 	bus := mock.NewBus()
 
 	var (
-		realLine uplink
-		module   *ft12.Link
+		lineSpec string
+		realLine *gateway.Line
 	)
 
 	switch {
@@ -134,15 +129,23 @@ func main() {
 		log.Fatal("Use either -serial or -tunnel")
 
 	case *serialPort != "":
-		module = openModule(*serialPort, *baud)
-		realLine = module
+		lineSpec = fmt.Sprintf("ft12:%s?baud=%d", *serialPort, *baud)
 
 	case *uplinkTunnel != "":
-		realLine = openUplinkTunnel(*uplinkTunnel)
+		lineSpec = "tunnel:" + *uplinkTunnel
 	}
 
-	if realLine != nil {
-		bridge(bus, realLine)
+	if lineSpec != "" {
+		spec, err := gateway.ParseSpec(lineSpec)
+		if err == nil {
+			realLine, err = gateway.OpenLine(spec)
+		}
+
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		gateway.Bridge(bus, realLine, spec.Target)
 
 		tunnelsSet := false
 		flag.Visit(func(f *flag.Flag) { tunnelsSet = tunnelsSet || f.Name == "tunnels" })
@@ -154,17 +157,22 @@ func main() {
 	}
 
 	if *monitor {
-		go printTelegrams(bus.Attach(0))
+		go gateway.PrintTelegrams(bus.Attach(0))
 	}
 
 	var hosted []*hostedDevice
 
 	if *moduleDevice {
-		if module == nil {
+		if realLine == nil || realLine.Module == nil {
 			log.Fatal("-module-device needs -serial")
 		}
 
-		hosted = append(hosted, startModuleDevice(bus, module, tunnelAddrs, info.Address))
+		d, kind, err := gateway.StartModuleDevice(bus, 1, realLine.Module, tunnelAddrs, info.Address)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		hosted = append(hosted, &hostedDevice{d: d, kind: kind})
 	}
 
 	for _, s := range strings.Split(*devices, ",") {
@@ -201,12 +209,12 @@ func main() {
 	}
 
 	if *password != "" {
-		config.Server.Secure = secureConfig(*password, *authCode, len(tunnelAddrs))
+		config.Server.Secure = gateway.SecureConfig(*password, *authCode, len(tunnelAddrs))
 		log.Printf("KNX IP Secure: users 1 to %d with the password, device authentication code %q", 1+len(tunnelAddrs), *authCode)
 	}
 
 	if *trace {
-		config.Trace = printPacket
+		config.Trace = gateway.PrintPacket
 	}
 
 	server, err := knxip.ListenTunnelServer(ifi, *port, config)
@@ -222,232 +230,8 @@ func main() {
 	commands(hosted, rooms)
 }
 
-// interfaceSerial returns the serial number of the interface. It differs by port, because ETS tells
-// interfaces apart by their serial numbers.
-func interfaceSerial(port int) [6]byte {
-	if port == knxnet.Port {
-		port = 1
-	}
-
-	return [6]byte{manufacturer >> 8, manufacturer & 0xff, 0xff, 0xff, byte(port >> 8), byte(port)}
-}
-
-// An uplink connects the virtual line to a real one.
-type uplink interface {
-	link.Link
-	link.Addresser
-}
-
-// openModule opens the serial module of -serial. The module is closed on SIGINT and SIGTERM, which
-// switches an EMI2 interface back to normal mode.
-func openModule(path string, baud int) *ft12.Link {
-	port, err := serial.Open(path, baud, serial.ParityEven)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	module, err := ft12.Open(port, ft12.DefaultConfig)
-	if err != nil {
-		log.Fatalf("Opening the module on %s: %v", path, err)
-	}
-
-	if _, err := module.ReadAddress(); err != nil {
-		log.Fatalf("Reading the address of the module: %v", err)
-	}
-
-	log.Printf("Real line through %s: %v module at %v", path, module.Protocol(), module.Address())
-	closeOnSignal(module)
-
-	return module
-}
-
-// openUplinkTunnel opens the tunnel of -tunnel. It is closed on SIGINT and SIGTERM, so that the
-// other interface frees it at once.
-func openUplinkTunnel(address string) *knxip.Tunnel {
-	t, err := knxip.DialTunnel(address, knxip.DefaultTunnelConfig)
-	if err != nil {
-		log.Fatalf("Connecting to %s: %v", address, err)
-	}
-
-	log.Printf("Real line through a tunnel to %s, address %v", address, t.Address())
-	closeOnSignal(t)
-
-	return t
-}
-
-func closeOnSignal(l link.Link) {
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		<-signals
-		l.Close()
-		os.Exit(1)
-	}()
-}
-
-// bridge passes frames between the virtual line and the real one.
-func bridge(bus *mock.Bus, realLine uplink) {
-	up := bus.AttachUplink()
-
-	go func() {
-		for ind := range realLine.Inbound() {
-			up.Send(&cemi.LDataReq{LData: ind.LData})
-		}
-
-		log.Fatal("The connection to the real line closed")
-	}()
-
-	go func() {
-		for ind := range up.Inbound() {
-			if err := realLine.Send(&cemi.LDataReq{LData: ind.LData}); err != nil {
-				log.Printf("To the real line: %v: %s", err, pretty.Frame(&ind.LData))
-			}
-		}
-	}()
-}
-
-// startModuleDevice hosts a device for the serial module as device 1, with the module's mask
-// version and serial number. When ETS assigns it a new address, the module gets it too, so that it
-// acknowledges the frames to it. A tunnel client at the module's address talks to it as alias, the
-// address of the interface.
-func startModuleDevice(bus *mock.Bus, module *ft12.Link, tunnels []cemi.IndividualAddr, alias cemi.IndividualAddr) *hostedDevice {
-	identity := device.Identity{MaskVersion: 0x0701} // EMI2 modules are BCU2
-
-	mask, err := module.ReadProperty(cemi.ObjectTypeDevice, 1, cemi.PIDDeviceDescriptor, 1, 1)
-	if err == nil && len(mask) == 2 {
-		identity.MaskVersion = uint16(mask[0])<<8 | uint16(mask[1])
-	}
-
-	if serial, err := module.SerialNumber(); err == nil {
-		identity.SerialNumber = serial
-	}
-
-	d, err := device.New(identity, device.Config{Address: module.Address()})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	d.OnAddressChange(func(addr cemi.IndividualAddr) {
-		if err := module.SetAddress(addr); err != nil {
-			log.Printf("Device 1: setting the address of the module to %v: %v", addr, err)
-			log.Printf("Device 1: assign it through another interface: knxmon -serial-address %x:%v", identity.SerialNumber[:], addr)
-			return
-		}
-
-		log.Printf("Device 1: address %v, the module has it too", addr)
-	})
-	d.OnProgModeChange(func(on bool) { log.Printf("Device 1: programming mode %v", on) })
-
-	l := &moduleLink{
-		Link:    bus.Attach(module.Address()),
-		alias:   alias,
-		inbound: make(chan *cemi.LDataInd, 64),
-		peers:   map[cemi.IndividualAddr]time.Time{},
-	}
-
-	for _, t := range tunnels {
-		if t == module.Address() {
-			l.tunnel = t
-		}
-	}
-
-	go l.filter()
-
-	go func() {
-		if err := d.Run(l); err != nil {
-			log.Printf("Device 1: %v", err)
-		}
-	}()
-
-	return &hostedDevice{d: d, kind: fmt.Sprintf("%v module %04X", module.Protocol(), identity.MaskVersion)}
-}
-
-// moduleLink attaches the module device to the bus. The device usually shares its address with the
-// tunnel, and frames to that address may then be for either. The device gets broadcasts,
-// connectionless frames and the connections that start with a T_Connect to it; the frames of the
-// tunnel client's own connections stay away from it, as its transport layer would answer them with
-// T_Disconnect.
-//
-// The tunnel client can talk to the device too, e.g. ETS connected through the module reading its
-// identity. The device ignores frames from its own address, so the client appears to it as alias.
-type moduleLink struct {
-	*mock.Link
-	tunnel  cemi.IndividualAddr // shared with the device, or zero
-	alias   cemi.IndividualAddr
-	inbound chan *cemi.LDataInd
-	peers   map[cemi.IndividualAddr]time.Time // connected to the device, by last frame
-}
-
-// A transport connection closes after 6 seconds without frames.
-const connectionTimeout = 6 * time.Second
-
-func (l *moduleLink) filter() {
-	for ind := range l.Link.Inbound() {
-		if l.pass(ind, time.Now()) {
-			l.inbound <- ind
-		}
-	}
-
-	close(l.inbound)
-}
-
-func (l *moduleLink) pass(ind *cemi.LDataInd, now time.Time) bool {
-	if l.tunnel == 0 || l.Address() != l.tunnel {
-		return true
-	}
-
-	if ind.Source == l.tunnel {
-		ind.Source = l.alias
-		return true
-	}
-
-	if ind.Control2.IsGroupAddr() || cemi.IndividualAddr(ind.Destination) != l.tunnel {
-		return true
-	}
-
-	control, ok := ind.Data.(*cemi.ControlData)
-	if app, isApp := ind.Data.(*cemi.AppData); isApp && !app.Numbered {
-		return true // connectionless
-	}
-
-	switch {
-	case ok && !control.Numbered && control.Command == 0: // T_Connect
-		l.peers[ind.Source] = now
-		return true
-
-	case ok && !control.Numbered && control.Command == 1: // T_Disconnect
-		_, connected := l.peers[ind.Source]
-		delete(l.peers, ind.Source)
-
-		return connected
-	}
-
-	if last, connected := l.peers[ind.Source]; connected && now.Sub(last) < connectionTimeout {
-		l.peers[ind.Source] = now
-		return true
-	}
-
-	delete(l.peers, ind.Source)
-
-	return false
-}
-
-// Send passes the frames of the device to the tunnel client, which it knows as alias.
-func (l *moduleLink) Send(req *cemi.LDataReq) error {
-	if l.tunnel != 0 && !req.Control2.IsGroupAddr() && cemi.IndividualAddr(req.Destination) == l.alias {
-		req.Destination = uint16(l.tunnel)
-	}
-
-	return l.Link.Send(req)
-}
-
-func (l *moduleLink) Inbound() <-chan *cemi.LDataInd {
-	return l.inbound
-}
-
 func parseAddress(s string) cemi.IndividualAddr {
-	addr, err := cemi.NewIndividualAddrString(strings.TrimSpace(s))
+	addr, err := gateway.ParseAddress(s)
 	if err != nil {
 		log.Fatalf("Invalid individual address %q: %v", s, err)
 	}
@@ -722,84 +506,4 @@ func commands(hosted []*hostedDevice, rooms *vbus.Rooms) {
 
 	// Without a terminal, e.g. in the background, keep serving.
 	select {}
-}
-
-// printTelegrams prints the frames on the bus.
-func printTelegrams(l link.Link) {
-	for ind := range l.Inbound() {
-		log.Print(pretty.Frame(&ind.LData))
-	}
-}
-
-// printPacket prints a KNXnet/IP packet that the server received or sent.
-func printPacket(received bool, peer knxnet.HPAI, packet []byte) {
-	direction := "->"
-	if received {
-		direction = "<-"
-	}
-
-	endpoint := func(h knxnet.HPAI) string { return fmt.Sprintf("%v:%d", net.IP(h.IP[:]), h.Port) }
-
-	var text string
-
-	service, err := knxnet.Decode(packet)
-	switch s := service.(type) {
-	case nil:
-		text = fmt.Sprintf("% x (%v)", packet, err)
-	case *knxnet.ConnectRequest:
-		text = fmt.Sprintf("ConnectRequest type %d, control %s, data %s", s.Type, endpoint(s.Control), endpoint(s.Data))
-	case *knxnet.ConnectResponse:
-		text = fmt.Sprintf("ConnectResponse channel %d, %v, data %s, address %v", s.Channel, s.Status, endpoint(s.Data), s.Address)
-	case *knxnet.ConnectionStateRequest:
-		text = fmt.Sprintf("ConnectionStateRequest channel %d, control %s", s.Channel, endpoint(s.Control))
-	case *knxnet.ConnectionStateResponse:
-		text = fmt.Sprintf("ConnectionStateResponse channel %d, %v", s.Channel, s.Status)
-	case *knxnet.DisconnectRequest:
-		text = fmt.Sprintf("DisconnectRequest channel %d, control %s", s.Channel, endpoint(s.Control))
-	case *knxnet.DisconnectResponse:
-		text = fmt.Sprintf("DisconnectResponse channel %d, %v", s.Channel, s.Status)
-	case *knxnet.TunnellingRequest:
-		text = fmt.Sprintf("TunnellingRequest channel %d seq %d: %s", s.Channel, s.Sequence, message(s.Message))
-	case *knxnet.TunnellingAck:
-		text = fmt.Sprintf("TunnellingAck channel %d seq %d, %v", s.Channel, s.Sequence, s.Status)
-	case *knxnet.DeviceConfigRequest:
-		text = fmt.Sprintf("DeviceConfigRequest channel %d seq %d: %s", s.Channel, s.Sequence, message(s.Message))
-	case *knxnet.DeviceConfigAck:
-		text = fmt.Sprintf("DeviceConfigAck channel %d seq %d, %v", s.Channel, s.Sequence, s.Status)
-	default:
-		text = fmt.Sprintf("%T", service)
-	}
-
-	log.Printf("%s %s %s", direction, endpoint(peer), text)
-}
-
-// message describes a cEMI message.
-func message(m cemi.Message) string {
-	switch m := m.(type) {
-	case *cemi.LDataReq:
-		return "L_Data.req " + pretty.Frame(&m.LData)
-	case *cemi.LDataInd:
-		return "L_Data.ind " + pretty.Frame(&m.LData)
-	case *cemi.LDataCon:
-		if m.Control1&cemi.Control1HasError != 0 {
-			return "L_Data.con (negative) " + pretty.Frame(&m.LData)
-		}
-
-		return "L_Data.con " + pretty.Frame(&m.LData)
-	}
-
-	return fmt.Sprintf("%T %+v", m, m)
-}
-
-// secureConfig gives the management user and a tunnelling user per tunnel the same password, as
-// ETS does not tell which user it will authenticate as before it tries.
-func secureConfig(password, authCode string, tunnels int) *knxnet.SecureConfig {
-	key := secure.UserPasswordKey(password)
-	users := map[uint8][16]byte{}
-
-	for user := 1; user <= 1+tunnels; user++ {
-		users[uint8(user)] = key
-	}
-
-	return &knxnet.SecureConfig{DeviceAuth: secure.DeviceAuthKey(authCode), Users: users}
 }

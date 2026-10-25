@@ -53,7 +53,19 @@ type Router struct {
 	dropped atomic.Uint32
 	lost    atomic.Uint32
 	address atomic.Uint32
+
+	// The packets sent in the last echoTimeout, which come back through multicast loopback.
+	sentMu sync.Mutex
+	sent   []sentPacket
 }
+
+type sentPacket struct {
+	data string
+	at   time.Time
+}
+
+// Our own packets come back from the loopback within milliseconds.
+const echoTimeout = time.Second
 
 var (
 	_ link.Link          = (*Router)(nil)
@@ -180,6 +192,7 @@ func (r *Router) Send(req *cemi.LDataReq) error {
 	}
 
 	r.lastSend = time.Now()
+	r.remember(packet, r.lastSend)
 
 	if _, err := r.tx.WriteTo(packet, r.group); err != nil {
 		if isClosed(err) {
@@ -216,6 +229,10 @@ func (r *Router) read() {
 			continue
 		}
 
+		if r.echo(buffer[:n], time.Now()) {
+			continue
+		}
+
 		s, err := knxnet.Decode(buffer[:n])
 		if err != nil {
 			continue
@@ -244,6 +261,43 @@ func (r *Router) read() {
 			r.lost.Add(uint32(s.Lost))
 		}
 	}
+}
+
+// remember records a sent packet, so that its echo is not taken for a frame from another router.
+// Frames from other lines that a gateway passes on keep their source address, so the address
+// alone does not tell them apart.
+func (r *Router) remember(packet []byte, now time.Time) {
+	r.sentMu.Lock()
+	defer r.sentMu.Unlock()
+
+	r.expire(now)
+	r.sent = append(r.sent, sentPacket{data: string(packet), at: now})
+}
+
+// echo reports whether a received packet is one that this router sent.
+func (r *Router) echo(packet []byte, now time.Time) bool {
+	r.sentMu.Lock()
+	defer r.sentMu.Unlock()
+
+	r.expire(now)
+
+	for i, p := range r.sent {
+		if p.data == string(packet) {
+			r.sent = append(r.sent[:i], r.sent[i+1:]...)
+			return true
+		}
+	}
+
+	return false
+}
+
+func (r *Router) expire(now time.Time) {
+	n := 0
+	for n < len(r.sent) && now.Sub(r.sent[n].at) > echoTimeout {
+		n++
+	}
+
+	r.sent = r.sent[n:]
 }
 
 func isClosed(err error) bool {

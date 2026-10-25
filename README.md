@@ -28,6 +28,7 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
  `mgmt` | Management procedures for tools: line scan, reading all properties of a device
  `serial` | Opens serial ports on Linux with the standard library only
  `cmd/knxmon` | Bus tool over kBerry, TP-UART, KNXnet/IP tunnel or routing: monitor, group reads/writes, line scan, device properties, KNXnet/IP search
+ `cmd/knxgw` | Gateway between media, like ffmpeg: inputs kBerry/EMI2, TP-UART, tunnel, routing; outputs KNXnet/IP interface, routing, monitor; BAOS mode serves the ObjectServer over TCP like an IP BAOS
  `cmd/knxvbus` | Virtual KNX line with devices, served as a KNXnet/IP interface that ETS finds and tunnels to; simulated switch, dimmer, push buttons, thermostat and heating
  `examples/pico-kberry` | Switch actuator: Pico + kBerry, LED on 1/1/1, status on 1/1/2, programming button
 
@@ -82,6 +83,30 @@ button GP15 → GND and LED on GP14):
 ```sh
 tinygo flash -target=pico ./examples/pico-kberry
 ```
+
+## A gateway between media
+
+`knxgw` connects inputs, which reach a real line, to outputs, which serve it, like ffmpeg does with
+streams. In link mode the inputs pass telegrams, are bridged to each other and serve as one line:
+
+```sh
+knxgw -i ft12:/dev/ttyAMA0 -o knxip:wlan0                   # kBerry as a KNXnet/IP interface
+knxgw -i 'ft12:/dev/ttyAMA0?device' -o knxip:wlan0 -o monitor # host the module too (p 1 in ETS)
+knxgw -i 'tpuart:/dev/ttyUSB0?address=1.1.250' -o knxip:eth0 -o routing:eth0
+knxgw -i tunnel:192.168.1.112 -o 'knxip:wlan0?port=3672&name=via the Pi'
+knxgw -i routing:eth0 -o 'knxip:eth0?tunnels=1.1.250,1.1.251'  # tunnelling for a KNX IP router
+```
+
+In BAOS mode the input is the ObjectServer of a BAOS module, and `-o baos` serves it over TCP port
+12004 like an IP BAOS, to any number of clients; all of them get the value indications:
+
+```sh
+knxgw -i baos:/dev/ttyAMA0 -o baos:wlan0 -o monitor   # on the Pi
+knxgw -i baos:tcp://192.168.2.29 -o monitor           # anywhere else
+```
+
+`knxgw -h` lists all media and their options. Inputs must reach different lines, or frames loop;
+routing ignores the echo of its own multicast, so it can be both an input and an output.
 
 ## A virtual bus for ETS
 
