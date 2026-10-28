@@ -20,6 +20,7 @@
 //	knxmon -port /dev/serial0 -baos              # BAOS mode: datapoints of the module's ObjectServer
 //	knxmon -port /dev/serial0 -baos -set 2=01 -get 1  # set and send DP 2, read DP 1 from the bus
 //	knxmon -port tcp://192.168.2.29 -baos        # the same through knxgw -o baos (or unix:PATH)
+//	knxmon -port udp://192.168.2.29 -baos        # the same over KNXnet/IP (knxgw -o knxip, IP BAOS)
 package main
 
 import (
@@ -57,7 +58,7 @@ type busLink interface {
 }
 
 func main() {
-	port := flag.String("port", "/dev/serial0", "serial port of the BAOS module (cEMI or EMI2) or TP-UART; with -baos also tcp://HOST[:PORT] or unix:PATH of knxgw -o baos")
+	port := flag.String("port", "/dev/serial0", "serial port of the BAOS module (cEMI or EMI2) or TP-UART; with -baos also tcp://HOST[:PORT] or unix:PATH of knxgw -o baos, or udp://HOST[:PORT] of knxgw -o knxip or an IP BAOS")
 	baud := flag.Int("baud", 19200, "baud rate")
 	useTPUART := flag.Bool("tpuart", false, "the serial port has a TP-UART or NCN5120")
 	chip := flag.String("chip", "ncn5120", "TP-UART chip: ncn5120 or tpuart2")
@@ -531,6 +532,11 @@ func printServers(ifi *net.Interface) {
 		var families []string
 
 		for _, f := range s.Info.Families {
+			if v, ok := s.Info.ObjectServer(); ok && f.ID == knxnet.FamilyObjectServer {
+				families = append(families, fmt.Sprintf("ObjectServer %d.%d", v>>4, v&0xF))
+				continue
+			}
+
 			if name, ok := familyNames[f.ID]; ok {
 				families = append(families, fmt.Sprintf("%s v%d", name, f.Version))
 			}
@@ -559,6 +565,7 @@ var familyNames = map[uint8]string{
 	knxnet.FamilyTunnelling:       "tunnelling",
 	knxnet.FamilyRouting:          "routing",
 	knxnet.FamilySecurity:         "security",
+	knxnet.FamilyObjectServer:     "ObjectServer",
 }
 
 // scanLine lists the devices of a line, e.g. "1.1".

@@ -25,6 +25,11 @@ type TunnelServerConfig struct {
 	// addressed to a group or to the tunnel.
 	Attach func(addr cemi.IndividualAddr) link.Link
 
+	// ObjectServer, if set, serves each ObjectServer connection of a client, in a goroutine of
+	// its own, until the connection closes. Server.ObjectServer gives the version of the
+	// ObjectServer protocol, which the server announces and accepts connections for.
+	ObjectServer func(conn *ObjectServerConn)
+
 	// Log, if set, is called for connections that open and close.
 	Log func(format string, args ...any)
 
@@ -39,6 +44,9 @@ type TunnelServerConfig struct {
 // Device management connections answer M_PropRead requests for the properties that tools read
 // from an interface (serial number, individual address, name and the like) from the server
 // description.
+//
+// Like an IP BAOS, the server can also serve the ObjectServer protocol of a BAOS on connections of
+// type 0xF0 (TunnelServerConfig.ObjectServer).
 type TunnelServer struct {
 	config  TunnelServerConfig
 	control *net.UDPConn
@@ -59,6 +67,52 @@ type TunnelServer struct {
 	wg      sync.WaitGroup
 
 	tunnels map[uint8]*serverTunnel // by channel; touched only by serve
+
+	objects map[uint8]*ObjectServerConn // by channel; touched only by serve
+	outbox  chan objectMessage
+}
+
+// An ObjectServerConn is a connection of a client to the ObjectServer of a TunnelServer.
+type ObjectServerConn struct {
+	// Channel is the channel ID of the connection.
+	Channel uint8
+
+	server   *TunnelServer
+	requests chan []byte
+	done     chan struct{} // closed when the connection closes
+}
+
+// A message of the ObjectServer protocol to a client, or (close set) the end of its connection.
+type objectMessage struct {
+	conn  *ObjectServerConn
+	data  []byte
+	close bool
+}
+
+// Requests returns the messages of the ObjectServer protocol from the client. The channel closes
+// when the connection closes.
+func (c *ObjectServerConn) Requests() <-chan []byte { return c.requests }
+
+// Send sends a message of the ObjectServer protocol to the client: the response to a request, or an
+// indication. It reports false if the connection is closed.
+func (c *ObjectServerConn) Send(message []byte) bool {
+	return c.post(objectMessage{conn: c, data: message})
+}
+
+// Close closes the connection, telling the client.
+func (c *ObjectServerConn) Close() {
+	c.post(objectMessage{conn: c, close: true})
+}
+
+func (c *ObjectServerConn) post(m objectMessage) bool {
+	select {
+	case c.server.outbox <- m:
+		return true
+	case <-c.done:
+	case <-c.server.done:
+	}
+
+	return false
 }
 
 type serverPacket struct {
@@ -155,6 +209,8 @@ func newTunnelServer(control, search *net.UDPConn, listener *net.TCPListener, co
 		frames:   make(chan tunnelFrame, 64),
 		done:     make(chan struct{}),
 		tunnels:  make(map[uint8]*serverTunnel),
+		objects:  make(map[uint8]*ObjectServerConn),
+		outbox:   make(chan objectMessage, 64),
 	}
 
 	s.wg.Add(1)
@@ -400,6 +456,22 @@ func (s *TunnelServer) serve() {
 				s.handle(func(now time.Time) { s.server.Indicate(now, f.tunnel.channel, f.ind) })
 			}
 
+		case m := <-s.outbox:
+			if s.objects[m.conn.Channel] != m.conn {
+				continue // closed meanwhile
+			}
+
+			if m.close {
+				s.handle(func(time.Time) { s.server.Disconnect(m.conn.Channel) })
+				continue
+			}
+
+			s.handle(func(now time.Time) {
+				if !s.server.SendObjectServer(now, m.conn.Channel, m.data) {
+					s.logf("ObjectServer connection %d: dropped a message for the busy client", m.conn.Channel)
+				}
+			})
+
 		case now := <-tick:
 			s.handle(func(time.Time) { s.server.Tick(now) })
 		}
@@ -429,8 +501,15 @@ func (s *TunnelServer) handle(f func(now time.Time)) {
 				secured = fmt.Sprintf(" in secure session %d of user %d", event.Session, event.User)
 			}
 
-			if event.Address == 0 {
+			switch event.Type {
+			case knxnet.DeviceManagementConnection:
 				s.logf("Management connection %d opened%s", event.Channel, secured)
+				continue
+
+			case knxnet.ObjectServerConnection:
+				s.logf("ObjectServer connection %d opened%s", event.Channel, secured)
+				s.openObjectServer(event.Channel)
+
 				continue
 			}
 
@@ -449,7 +528,21 @@ func (s *TunnelServer) handle(f func(now time.Time)) {
 				t.link.Close()
 			}
 
+			s.closeObjectServer(event.Channel)
+
 		case knxnet.ServerMessage:
+			if event.Type == knxnet.ObjectServerConnection {
+				if c, ok := s.objects[event.Channel]; ok {
+					select {
+					case c.requests <- event.Data:
+					default:
+						s.logf("ObjectServer connection %d: dropped a request, the ObjectServer is busy", event.Channel)
+					}
+				}
+
+				continue
+			}
+
 			// Management messages may come on tunnels too, e.g. ETS reads the maximum APDU length.
 			if req, ok := event.Message.(*cemi.LDataReq); ok {
 				if t, ok := s.tunnels[event.Channel]; ok {
@@ -508,6 +601,27 @@ func (s *TunnelServer) open(channel uint8, addr cemi.IndividualAddr) {
 	}()
 }
 
+// openObjectServer serves a new ObjectServer connection.
+func (s *TunnelServer) openObjectServer(channel uint8) {
+	if s.config.ObjectServer == nil {
+		s.server.Disconnect(channel)
+		return
+	}
+
+	c := &ObjectServerConn{Channel: channel, server: s, requests: make(chan []byte, 16), done: make(chan struct{})}
+	s.objects[channel] = c
+
+	go s.config.ObjectServer(c)
+}
+
+func (s *TunnelServer) closeObjectServer(channel uint8) {
+	if c, ok := s.objects[channel]; ok {
+		delete(s.objects, channel)
+		close(c.requests)
+		close(c.done)
+	}
+}
+
 func (s *TunnelServer) shutdown() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -531,6 +645,10 @@ func (s *TunnelServer) shutdown() {
 		delete(s.tunnels, channel)
 		close(t.send)
 		t.link.Close()
+	}
+
+	for channel := range s.objects {
+		s.closeObjectServer(channel)
 	}
 
 	s.control.Close()

@@ -42,6 +42,11 @@ type ServerConfig struct {
 	// TCP tells that the caller also takes connections over TCP, which the server then
 	// announces as KNXnet/IP core v2. ETS opens secure sessions only over TCP.
 	TCP bool
+
+	// ObjectServer, if not zero, is the version of the ObjectServer protocol of a BAOS (0x20 for
+	// 2.0) that the server serves on connections of type ObjectServerConnection. Search responses
+	// then carry its service family and ObjectServerData, as those of an IP BAOS.
+	ObjectServer uint8
 }
 
 // DefaultServerConfig contains the timings from the KNXnet/IP specification.
@@ -59,8 +64,8 @@ const (
 	// ServerSend asks the caller to send Packet to the client endpoint To.
 	ServerSend ServerEventKind = iota
 
-	// ServerOpened reports a new connection. Address is the tunnel address; it is zero for a
-	// device management connection.
+	// ServerOpened reports a new connection of Type. Address is the tunnel address; it is zero
+	// for other connections.
 	ServerOpened
 
 	// ServerClosed reports that a connection was closed.
@@ -69,7 +74,8 @@ const (
 	// ServerMessage delivers a cEMI message from a client: an *cemi.LDataReq from a tunnel, which
 	// the caller sends to the bus and confirms with Confirm, or a management message (e.g.
 	// *cemi.MPropReadReq) from a device management connection, which the caller answers with
-	// Indicate.
+	// Indicate. On an ObjectServer connection, Data is a message of the ObjectServer protocol,
+	// which the caller answers with SendObjectServer.
 	ServerMessage
 
 	// ServerSecure reports the authentication of a user in a secure session, or the end of the
@@ -81,10 +87,12 @@ const (
 type ServerEvent struct {
 	Kind    ServerEventKind
 	Channel uint8
+	Type    ConnectionType      // for ServerOpened, ServerClosed and ServerMessage
 	Address cemi.IndividualAddr // tunnel address, for ServerOpened and ServerMessage
 	Packet  []byte              // for ServerSend
 	To      HPAI                // for ServerSend
 	Message cemi.Message        // for ServerMessage
+	Data    []byte              // for ServerMessage on an ObjectServer connection
 
 	// Session and User identify the secure session of a connection or a ServerSecure event, User
 	// is zero for plain connections.
@@ -96,7 +104,7 @@ type ServerEvent struct {
 // A connection of a Server.
 type serverConn struct {
 	channel    uint8
-	tunnel     bool
+	kind       ConnectionType
 	address    cemi.IndividualAddr
 	control    HPAI
 	data       HPAI
@@ -104,7 +112,7 @@ type serverConn struct {
 	seqSend    uint8
 	lastActive time.Time
 
-	queue    []cemi.Message // queue[0] is pending once sent
+	queue    []queued // queue[0] is pending once sent
 	pending  []byte
 	sentAt   time.Time
 	repeated bool
@@ -116,8 +124,16 @@ type serverConn struct {
 	stream bool
 }
 
+// A message waiting to be sent on a connection: a cEMI message, or one of the ObjectServer
+// protocol.
+type queued struct {
+	msg  cemi.Message
+	data []byte
+}
+
 // A Server is the server side of KNXnet/IP: it answers searches and description requests and
-// serves tunnelling and device management connections. Like Tunnel, it does no I/O: the caller
+// serves tunnelling and device management connections, and those of the ObjectServer protocol if
+// configured. Like Tunnel, it does no I/O: the caller
 // passes packets with HandlePacket, calls Tick when Deadline passes and carries out the events
 // from NextEvent.
 //
@@ -162,8 +178,23 @@ func NewServer(config ServerConfig) *Server {
 			core = 2
 		}
 
-		config.Device.Families = []ServiceFamily{
-			{FamilyCore, core}, {FamilyDeviceManagement, 1}, {FamilyTunnelling, 1},
+		config.Device.Families = []ServiceFamily{{FamilyCore, core}, {FamilyDeviceManagement, 1}}
+
+		// Without tunnels, a BAOS has three families, so that its manufacturer data comes at
+		// the offset where the ObjectServer protocol shows it.
+		if len(config.Tunnels) > 0 || config.ObjectServer == 0 {
+			config.Device.Families = append(config.Device.Families, ServiceFamily{FamilyTunnelling, 1})
+		}
+	}
+
+	if v := config.ObjectServer; v != 0 {
+		d := &config.Device
+		if !d.Supports(FamilyObjectServer) {
+			d.Families = append(d.Families[:len(d.Families):len(d.Families)], ServiceFamily{FamilyObjectServer, v >> 4})
+		}
+
+		if len(d.ManufacturerData) == 0 {
+			d.ManufacturerData = ObjectServerData(v)
 		}
 	}
 
@@ -194,6 +225,10 @@ func (s *Server) SetDevice(info DeviceInfo) {
 
 	if len(info.Secured) == 0 {
 		info.Secured = s.config.Device.Secured
+	}
+
+	if len(info.ManufacturerData) == 0 {
+		info.ManufacturerData = s.config.Device.ManufacturerData
 	}
 
 	s.config.Device = info
@@ -284,11 +319,26 @@ func (s *Server) Tick(now time.Time) {
 // is full.
 func (s *Server) Indicate(now time.Time, channel uint8, msg cemi.Message) bool {
 	c := s.conn(channel)
-	if c == nil || len(c.queue) >= s.config.QueueSize {
+	if c == nil || c.kind == ObjectServerConnection || len(c.queue) >= s.config.QueueSize {
 		return false
 	}
 
-	c.queue = append(c.queue, msg)
+	c.queue = append(c.queue, queued{msg: msg})
+	s.flush(now, c)
+
+	return true
+}
+
+// SendObjectServer sends a message of the ObjectServer protocol to the client of an ObjectServer
+// connection: the response to a request, or an indication. It reports false if there is no such
+// connection or its queue is full.
+func (s *Server) SendObjectServer(now time.Time, channel uint8, message []byte) bool {
+	c := s.conn(channel)
+	if c == nil || c.kind != ObjectServerConnection || len(c.queue) >= s.config.QueueSize {
+		return false
+	}
+
+	c.queue = append(c.queue, queued{data: message})
 	s.flush(now, c)
 
 	return true
@@ -405,16 +455,22 @@ func (s *Server) handle(now time.Time, from HPAI, service Service) {
 		s.reply(route(r.Control), &DisconnectResponse{Channel: r.Channel, Status: status})
 
 	case *TunnellingRequest:
-		s.request(now, from, r.Channel, r.Sequence, r.Message, true)
+		s.request(now, from, TunnelConnection, r.Channel, r.Sequence, queued{msg: r.Message})
 
 	case *DeviceConfigRequest:
-		s.request(now, from, r.Channel, r.Sequence, r.Message, false)
+		s.request(now, from, DeviceManagementConnection, r.Channel, r.Sequence, queued{msg: r.Message})
+
+	case *ObjectServerRequest:
+		s.request(now, from, ObjectServerConnection, r.Channel, r.Sequence, queued{data: r.Message})
 
 	case *TunnellingAck:
-		s.acked(now, r.Channel, r.Sequence, r.Status, true)
+		s.acked(now, TunnelConnection, r.Channel, r.Sequence)
 
 	case *DeviceConfigAck:
-		s.acked(now, r.Channel, r.Sequence, r.Status, false)
+		s.acked(now, DeviceManagementConnection, r.Channel, r.Sequence)
+
+	case *ObjectServerAck:
+		s.acked(now, ObjectServerConnection, r.Channel, r.Sequence)
 	}
 }
 
@@ -423,7 +479,7 @@ func (s *Server) connect(now time.Time, control, data HPAI, r *ConnectRequest) {
 		s.reply(control, &ConnectResponse{Status: status})
 	}
 
-	c := &serverConn{control: control, data: data, lastActive: now, session: s.current, stream: control.Protocol == ProtocolTCP}
+	c := &serverConn{kind: r.Type, control: control, data: data, lastActive: now, session: s.current, stream: control.Protocol == ProtocolTCP}
 
 	switch r.Type {
 	case TunnelConnection:
@@ -438,11 +494,16 @@ func (s *Server) connect(now time.Time, control, data HPAI, r *ConnectRequest) {
 			return
 		}
 
-		c.tunnel = true
 		c.address = addr
 
 	case DeviceManagementConnection:
 		if c.session != nil && c.session.user != 1 {
+			fail(StatusConnectionType)
+			return
+		}
+
+	case ObjectServerConnection:
+		if s.config.ObjectServer == 0 || c.session != nil && c.session.user != 1 {
 			fail(StatusConnectionType)
 			return
 		}
@@ -474,14 +535,14 @@ func (s *Server) connect(now time.Time, control, data HPAI, r *ConnectRequest) {
 		Type:    r.Type,
 		Address: c.address,
 	})
-	s.emit(ServerEvent{Kind: ServerOpened, Channel: c.channel, Address: c.address, Session: c.sessionID(), User: c.user()})
+	s.emit(ServerEvent{Kind: ServerOpened, Channel: c.channel, Type: c.kind, Address: c.address, Session: c.sessionID(), User: c.user()})
 }
 
 func (s *Server) freeTunnel() (cemi.IndividualAddr, bool) {
 next:
 	for _, addr := range s.config.Tunnels {
 		for _, c := range s.conns {
-			if c.tunnel && c.address == addr {
+			if c.kind == TunnelConnection && c.address == addr {
 				continue next
 			}
 		}
@@ -492,16 +553,22 @@ next:
 	return 0, false
 }
 
-// request handles a TUNNELLING_REQUEST or DEVICE_CONFIGURATION_REQUEST.
-func (s *Server) request(now time.Time, from HPAI, channel, seq uint8, msg cemi.Message, tunnel bool) {
+// request handles a TUNNELLING_REQUEST, DEVICE_CONFIGURATION_REQUEST or ObjectServer request on a
+// connection of the kind.
+func (s *Server) request(now time.Time, from HPAI, kind ConnectionType, channel, seq uint8, msg queued) {
 	ack := func(c *serverConn, status Status) {
 		if from.Protocol == ProtocolTCP {
 			return
 		}
 
-		var service Service = &TunnellingAck{Channel: channel, Sequence: seq, Status: status}
-		if !tunnel {
+		var service Service
+		switch kind {
+		case TunnelConnection:
+			service = &TunnellingAck{Channel: channel, Sequence: seq, Status: status}
+		case DeviceManagementConnection:
 			service = &DeviceConfigAck{Channel: channel, Sequence: seq, Status: status}
+		default:
+			service = &ObjectServerAck{Channel: channel, Sequence: seq, Status: status}
 		}
 
 		to := from
@@ -513,7 +580,7 @@ func (s *Server) request(now time.Time, from HPAI, channel, seq uint8, msg cemi.
 	}
 
 	c := s.peer(channel)
-	if c == nil || c.tunnel != tunnel {
+	if c == nil || c.kind != kind {
 		ack(nil, StatusConnectionID)
 		return
 	}
@@ -533,20 +600,20 @@ func (s *Server) request(now time.Time, from HPAI, channel, seq uint8, msg cemi.
 	c.lastActive = now
 	ack(c, StatusOK)
 
-	if msg == nil {
+	if msg.msg == nil && msg.data == nil {
 		return
 	}
 
-	if req, ok := msg.(*cemi.LDataReq); ok && req.Source == 0 {
+	if req, ok := msg.msg.(*cemi.LDataReq); ok && req.Source == 0 {
 		req.Source = c.address
 	}
 
-	s.emit(ServerEvent{Kind: ServerMessage, Channel: channel, Address: c.address, Message: msg, Session: c.sessionID(), User: c.user()})
+	s.emit(ServerEvent{Kind: ServerMessage, Channel: channel, Type: kind, Address: c.address, Message: msg.msg, Data: msg.data, Session: c.sessionID(), User: c.user()})
 }
 
-func (s *Server) acked(now time.Time, channel, seq uint8, status Status, tunnel bool) {
+func (s *Server) acked(now time.Time, kind ConnectionType, channel, seq uint8) {
 	c := s.peer(channel)
-	if c == nil || c.tunnel != tunnel || c.stream || c.pending == nil || seq != c.seqSend {
+	if c == nil || c.kind != kind || c.stream || c.pending == nil || seq != c.seqSend {
 		return
 	}
 
@@ -563,25 +630,15 @@ func (s *Server) acked(now time.Time, channel, seq uint8, status Status, tunnel 
 // TCP.
 func (s *Server) flush(now time.Time, c *serverConn) {
 	for ; c.stream && len(c.queue) > 0; c.queue = c.queue[1:] {
-		var service Service = &TunnellingRequest{Channel: c.channel, Sequence: c.seqSend, Message: c.queue[0]}
-		if !c.tunnel {
-			service = &DeviceConfigRequest{Channel: c.channel, Sequence: c.seqSend, Message: c.queue[0]}
-		}
-
+		s.sendVia(c.session, c.data, Encode(c.request(c.queue[0])))
 		c.seqSend++
-		s.sendVia(c.session, c.data, Encode(service))
 	}
 
 	if c.pending != nil || len(c.queue) == 0 {
 		return
 	}
 
-	var service Service = &TunnellingRequest{Channel: c.channel, Sequence: c.seqSend, Message: c.queue[0]}
-	if !c.tunnel {
-		service = &DeviceConfigRequest{Channel: c.channel, Sequence: c.seqSend, Message: c.queue[0]}
-	}
-
-	c.pending = Encode(service)
+	c.pending = Encode(c.request(c.queue[0]))
 	c.sentAt = now
 	c.repeated = false
 	s.sendVia(c.session, c.data, c.pending)
@@ -600,7 +657,7 @@ func (s *Server) remove(c *serverConn) {
 		}
 	}
 
-	s.emit(ServerEvent{Kind: ServerClosed, Channel: c.channel, Address: c.address, Session: c.sessionID(), User: c.user()})
+	s.emit(ServerEvent{Kind: ServerClosed, Channel: c.channel, Type: c.kind, Address: c.address, Session: c.sessionID(), User: c.user()})
 }
 
 func (s *Server) conn(channel uint8) *serverConn {
@@ -621,6 +678,18 @@ func (s *Server) peer(channel uint8) *serverConn {
 	}
 
 	return nil
+}
+
+// request returns the request that carries a message on the connection.
+func (c *serverConn) request(msg queued) Service {
+	switch c.kind {
+	case TunnelConnection:
+		return &TunnellingRequest{Channel: c.channel, Sequence: c.seqSend, Message: msg.msg}
+	case DeviceManagementConnection:
+		return &DeviceConfigRequest{Channel: c.channel, Sequence: c.seqSend, Message: msg.msg}
+	}
+
+	return &ObjectServerRequest{Channel: c.channel, Sequence: c.seqSend, Message: msg.data}
 }
 
 func (c *serverConn) sessionID() uint16 {

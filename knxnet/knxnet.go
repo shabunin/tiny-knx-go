@@ -47,6 +47,8 @@ const (
 	SessionAuthenticateID     ServiceID = 0x0953
 	SessionStatusID           ServiceID = 0x0954
 	TimerNotifyID             ServiceID = 0x0955
+	ObjectServerRequestID     ServiceID = 0xF080
+	ObjectServerAckID         ServiceID = 0xF081
 )
 
 func (id ServiceID) String() string {
@@ -63,6 +65,21 @@ type Service interface {
 
 const headerSize = 6
 
+// The ObjectServer services of Weinzierl's BAOS have protocol version 2.0 in their header, the
+// others 1.0.
+const (
+	protocolVersion             = 0x10
+	objectServerProtocolVersion = 0x20
+)
+
+func headerVersion(id ServiceID) uint8 {
+	if id == ObjectServerRequestID || id == ObjectServerAckID {
+		return objectServerProtocolVersion
+	}
+
+	return protocolVersion
+}
+
 // These errors are returned by Decode.
 var (
 	ErrHeader    = errors.New("knxnet: invalid header")
@@ -75,7 +92,7 @@ func Encode(s Service) []byte {
 	b := s.appendBody(make([]byte, headerSize, 64))
 
 	b[0] = headerSize
-	b[1] = 0x10 // protocol version 1.0
+	b[1] = headerVersion(s.ServiceID())
 	binary.BigEndian.PutUint16(b[2:], uint16(s.ServiceID()))
 	binary.BigEndian.PutUint16(b[4:], uint16(len(b)))
 
@@ -84,11 +101,15 @@ func Encode(s Service) []byte {
 
 // Decode parses a packet. Services that this package does not know are returned as *Unknown.
 func Decode(data []byte) (Service, error) {
-	if len(data) < headerSize || data[0] != headerSize || data[1] != 0x10 {
+	if len(data) < headerSize || data[0] != headerSize {
 		return nil, ErrHeader
 	}
 
 	id := ServiceID(binary.BigEndian.Uint16(data[2:]))
+	if data[1] != protocolVersion && data[1] != headerVersion(id) {
+		return nil, ErrHeader
+	}
+
 	total := int(binary.BigEndian.Uint16(data[4:]))
 
 	if total < headerSize || total > len(data) {
@@ -135,6 +156,11 @@ func Decode(data []byte) (Service, error) {
 	case DeviceConfigAckID:
 		t := r.tunnellingAck()
 		s = &DeviceConfigAck{Channel: t.Channel, Sequence: t.Sequence, Status: t.Status}
+	case ObjectServerRequestID:
+		s = r.objectServerRequest()
+	case ObjectServerAckID:
+		t := r.tunnellingAck()
+		s = &ObjectServerAck{Channel: t.Channel, Sequence: t.Sequence, Status: t.Status}
 	case RoutingIndicationID:
 		s = &RoutingIndication{Message: r.cemi()}
 	case RoutingLostMessageID:
@@ -314,6 +340,10 @@ type DeviceInfo struct {
 
 	// Secured lists the service families that need a secure session (KNX IP Secure).
 	Secured []ServiceFamily
+
+	// ManufacturerData is the content of the manufacturer data DIB: the manufacturer ID and its
+	// data, e.g. ObjectServerData. The DIB is left out if it is empty.
+	ManufacturerData []byte
 }
 
 // A ServiceFamily is a group of services supported by a server, with its version.
@@ -329,7 +359,35 @@ const (
 	FamilyTunnelling       uint8 = 0x04
 	FamilyRouting          uint8 = 0x05
 	FamilySecurity         uint8 = 0x09
+
+	// FamilyObjectServer is the ObjectServer protocol of Weinzierl's BAOS, whose version is
+	// the major version of the protocol.
+	FamilyObjectServer uint8 = 0xF0
 )
+
+// ObjectServerData returns the manufacturer data with which a BAOS tells in search responses that
+// it serves the ObjectServer protocol, e.g. version 0x20 for 2.0: Weinzierl's manufacturer ID
+// 0x00C5 and a record of type 1, F0 and the version.
+func ObjectServerData(version uint8) []byte {
+	return []byte{0x00, 0xC5, 0x01, 0x04, FamilyObjectServer, version}
+}
+
+// ObjectServer returns the version of the ObjectServer protocol (0x20 for 2.0) in the manufacturer
+// data of a BAOS, or false.
+func (d *DeviceInfo) ObjectServer() (uint8, bool) {
+	data := d.ManufacturerData
+	if len(data) < 2 || binary.BigEndian.Uint16(data) != 0x00C5 {
+		return 0, false
+	}
+
+	for records := data[2:]; len(records) >= 2 && records[1] >= 2 && int(records[1]) <= len(records); records = records[records[1]:] {
+		if records[0] == 1 && records[1] == 4 && records[2] == FamilyObjectServer {
+			return records[3], true
+		}
+	}
+
+	return 0, false
+}
 
 // Supports reports whether the server supports a service family.
 func (d *DeviceInfo) Supports(family uint8) bool {
@@ -346,6 +404,7 @@ const (
 	dibDeviceInfo = 0x01
 	dibFamilies   = 0x02
 	dibSecured    = 0x06
+	dibMfrData    = 0xFE
 )
 
 func (d *DeviceInfo) appendDIBs(b []byte) []byte {
@@ -363,6 +422,10 @@ func (d *DeviceInfo) appendDIBs(b []byte) []byte {
 	b = appendFamilies(b, dibFamilies, d.Families)
 	if len(d.Secured) > 0 {
 		b = appendFamilies(b, dibSecured, d.Secured)
+	}
+
+	if len(d.ManufacturerData) > 0 {
+		b = append(append(b, byte(2+len(d.ManufacturerData)), dibMfrData), d.ManufacturerData...)
 	}
 
 	return b
@@ -384,6 +447,9 @@ type ConnectionType uint8
 const (
 	DeviceManagementConnection ConnectionType = 0x03
 	TunnelConnection           ConnectionType = 0x04
+
+	// ObjectServerConnection carries the ObjectServer protocol of a BAOS (FamilyObjectServer).
+	ObjectServerConnection ConnectionType = 0xF0
 )
 
 // TunnelLayer selects the layer of a tunnelling connection.
@@ -542,6 +608,34 @@ type DeviceConfigAck struct {
 func (*DeviceConfigAck) ServiceID() ServiceID { return DeviceConfigAckID }
 
 func (s *DeviceConfigAck) appendBody(b []byte) []byte {
+	return append(b, 4, s.Channel, s.Sequence, byte(s.Status))
+}
+
+// ObjectServerRequest carries a message of the ObjectServer protocol over an ObjectServer
+// connection, in both directions: requests and indications to the server, responses and
+// indications from it.
+type ObjectServerRequest struct {
+	Channel  uint8
+	Sequence uint8
+	Message  []byte
+}
+
+func (*ObjectServerRequest) ServiceID() ServiceID { return ObjectServerRequestID }
+
+func (s *ObjectServerRequest) appendBody(b []byte) []byte {
+	return append(append(b, 4, s.Channel, s.Sequence, 0), s.Message...)
+}
+
+// ObjectServerAck acknowledges an ObjectServerRequest.
+type ObjectServerAck struct {
+	Channel  uint8
+	Sequence uint8
+	Status   Status
+}
+
+func (*ObjectServerAck) ServiceID() ServiceID { return ObjectServerAckID }
+
+func (s *ObjectServerAck) appendBody(b []byte) []byte {
 	return append(b, 4, s.Channel, s.Sequence, byte(s.Status))
 }
 
@@ -729,6 +823,19 @@ func (r *reader) tunnellingRequest() *TunnellingRequest {
 	return s
 }
 
+func (r *reader) objectServerRequest() *ObjectServerRequest {
+	r.expectLength(4)
+	s := &ObjectServerRequest{Channel: r.byte(), Sequence: r.byte()}
+	r.skip(1)
+
+	if r.err == nil {
+		s.Message = append([]byte(nil), r.data...)
+		r.data = nil
+	}
+
+	return s
+}
+
 func (r *reader) tunnellingAck() *TunnellingAck {
 	r.expectLength(4)
 
@@ -772,6 +879,9 @@ func (r *reader) dibs() DeviceInfo {
 
 		case dibSecured:
 			d.Secured = families(block)
+
+		case dibMfrData:
+			d.ManufacturerData = append([]byte(nil), block[2:]...)
 		}
 	}
 

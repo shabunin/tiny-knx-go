@@ -19,7 +19,7 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | `apdu` | Application layer services: group values, properties, memory, device descriptor… | ✓ |
 | `transport` | Transport connections: a state machine without I/O, and a client for tools | ✓ |
 | `dpt` | Datapoint types (DPT 1, 3, 5–14, 16–18, 20, 28, 232, 242, 251) | ✓ |
-| `knxnet` | KNXnet/IP packets, the tunnelling client and server state machines without I/O, KNX IP Secure sessions | ✓ |
+| `knxnet` | KNXnet/IP packets, the tunnelling client and server state machines without I/O, KNX IP Secure sessions, ObjectServer connections of an IP BAOS | ✓ |
 | `secure` | KNX Data Secure (A_SecureService, AES-128 CCM, sync requests) and the cryptography of KNX IP Secure | ✓ |
 
 **Devices and ETS**
@@ -39,7 +39,7 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | `link/mock` | In-memory bus for tests | ✓ |
 | `link/ft12` | BAOS modules (kBerry) and older EMI2 interfaces over FT1.2 serial, in data link layer mode; the protocol is detected, module restarts are survived | ✓ |
 | `link/tpuart` | TP-UART2 and NCN5120/5121/5130 transceivers | ✓ |
-| `link/knxip` | KNXnet/IP tunnelling client and server, routing and discovery over UDP and TCP (uses `net`) | |
+| `link/knxip` | KNXnet/IP tunnelling client and server, routing and discovery over UDP and TCP, the ObjectServer over KNXnet/IP as client and server (uses `net`) | |
 | `baos` | BAOS mode: the ObjectServer protocol (versions 1 and 2) of Weinzierl modules, whose datapoints ETS configures | ✓ |
 | `serial` | Opens serial ports on Linux with the standard library only | |
 
@@ -47,8 +47,8 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 | Command | Description |
 | :--- | :--- |
-| `cmd/knxmon` | Bus tool over kBerry, TP-UART, KNXnet/IP tunnel or routing: monitor, group reads/writes, line scan, device properties and memory, KNXnet/IP search; `-baos` talks to an ObjectServer on a serial port, `tcp://` or `unix:` |
-| `cmd/knxgw` | Gateway between media, like ffmpeg: inputs kBerry/EMI2, TP-UART, tunnel, routing; outputs KNXnet/IP interface, routing, monitor. BAOS mode serves the ObjectServer over TCP or a unix socket like an IP BAOS, and the datapoints as JSON like dobaos; `baos_auto` switches a module between both modes |
+| `cmd/knxmon` | Bus tool over kBerry, TP-UART, KNXnet/IP tunnel or routing: monitor, group reads/writes, line scan, device properties and memory, KNXnet/IP search; `-baos` talks to an ObjectServer on a serial port, `tcp://`, `udp://` (KNXnet/IP) or `unix:` |
+| `cmd/knxgw` | Gateway between media, like ffmpeg: inputs kBerry/EMI2, TP-UART, tunnel, routing; outputs KNXnet/IP interface, routing, monitor. BAOS mode serves the ObjectServer like an IP BAOS over TCP, KNXnet/IP (found by search) or a unix socket, and the datapoints as JSON like dobaos; `baos_auto` switches a module between both modes |
 | `cmd/baosctl` | REPL for the JSON datapoints of knxgw, a port of dobaos.tool, with history, line editing and completion |
 | `cmd/knxvbus` | Virtual KNX line with devices, served as a KNXnet/IP interface that ETS finds and tunnels to; simulated switch, dimmer, push buttons, thermostat and heating |
 
@@ -56,7 +56,7 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 | Package | Description |
 | :--- | :--- |
-| `internal/gateway` | The media of knxgw and knxvbus: specs, opening lines, bridging, the BAOS hub, the ObjectServer over TCP and unix sockets, switching a module between modes |
+| `internal/gateway` | The media of knxgw and knxvbus: specs, opening lines, bridging, the BAOS hub, the ObjectServer over TCP, unix sockets and KNXnet/IP, switching a module between modes |
 | `internal/sdk` | The JSON API of the datapoints: server, client, values by DPT, names |
 | `internal/vbus` | The simulated installation of knxvbus |
 | `internal/util`, `internal/pretty` | Helpers; printing telegrams for monitors |
@@ -141,11 +141,21 @@ knxgw -i baos:/dev/ttyAMA0 -o baos:wlan0 -o monitor   # on the Pi
 knxgw -i baos:tcp://192.168.2.29 -o monitor           # anywhere else
 ```
 
-`-o baos:/PATH` serves the same frames on a unix socket, for programs on the same host.
+`-o baos:/PATH` serves the same frames on a unix socket, for programs on the same host. `-o knxip`
+serves the ObjectServer over KNXnet/IP (UDP, connection type 0xF0), where clients find it by search
+as they find an IP BAOS; `baos:udp://HOST` and `knxmon -port udp://HOST -baos` connect to it, or to
+an IP BAOS:
+
+```sh
+knxgw -i baos:/dev/ttyAMA0 -o knxip:wlan0 -o baos:wlan0
+knxmon -search -iface eth0              # ... "tiny-knx-go gateway"  core v2, device management v1, ObjectServer 2.0
+knxmon -port udp://192.168.2.29 -baos
+```
 
 `baos_auto` makes a module both, like an IP BAOS: it stays in ObjectServer mode until ETS opens a
 tunnel of a knxip output, switches to data link layer mode for the tunnel, and goes back to
-ObjectServer mode 5 seconds (`?idle=`) after the last tunnel closed. While ETS has the line, the
+ObjectServer mode 5 seconds (`?idle=`) after the last tunnel closed. The knxip output serves the
+ObjectServer as well. While ETS has the line, the
 ObjectServer clients are disconnected and new ones turned away; `p` switches the programming mode
 in either mode (server item 15 in ObjectServer mode).
 

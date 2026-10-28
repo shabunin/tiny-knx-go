@@ -93,18 +93,29 @@ type packet struct {
 	from *net.UDPAddr
 }
 
-// DialTunnel connects to the KNXnet/IP server at address ("host" or "host:port").
-func DialTunnel(address string, config TunnelConfig) (*Tunnel, error) {
+// listenFor resolves the control endpoint of a KNXnet/IP server ("host" or "host:port") and opens
+// a socket to talk to it.
+func listenFor(address string) (*net.UDPConn, *net.UDPAddr, error) {
 	if _, _, err := net.SplitHostPort(address); err != nil {
 		address = net.JoinHostPort(address, "3671")
 	}
 
 	control, err := net.ResolveUDPAddr("udp4", address)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	conn, err := net.ListenUDP("udp4", nil)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return conn, control, nil
+}
+
+// DialTunnel connects to the KNXnet/IP server at address ("host" or "host:port").
+func DialTunnel(address string, config TunnelConfig) (*Tunnel, error) {
+	conn, control, err := listenFor(address)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +133,7 @@ func DialTunnel(address string, config TunnelConfig) (*Tunnel, error) {
 	}
 
 	packets := make(chan packet, 16)
-	go t.read(packets)
+	go readPackets(conn, packets, t.done)
 
 	connected := make(chan error, 1)
 	go t.serve(packets, connected)
@@ -180,21 +191,22 @@ func (t *Tunnel) Close() error {
 	return nil
 }
 
-// read passes packets from the socket to serve.
-func (t *Tunnel) read(packets chan<- packet) {
+// readPackets passes packets from the socket to the goroutine that serves the connection, until
+// the socket or done closes.
+func readPackets(conn *net.UDPConn, packets chan<- packet, done <-chan struct{}) {
 	defer close(packets)
 
 	buffer := make([]byte, 512)
 
 	for {
-		n, from, err := t.conn.ReadFromUDP(buffer)
+		n, from, err := conn.ReadFromUDP(buffer)
 		if err != nil {
 			return
 		}
 
 		select {
 		case packets <- packet{append([]byte(nil), buffer[:n]...), from}:
-		case <-t.done:
+		case <-done:
 			return
 		}
 	}
@@ -239,7 +251,7 @@ func (t *Tunnel) serve(packets <-chan packet, connected chan<- error) {
 
 			switch event.Kind {
 			case knxnet.EventSend:
-				t.send(tun, event)
+				sendPacket(t.conn, t.control, tun, event)
 
 			case knxnet.EventConnected:
 				t.address.Store(uint32(event.Address))
@@ -372,19 +384,19 @@ func (t *Tunnel) serve(packets <-chan packet, connected chan<- error) {
 	}
 }
 
-// send writes a packet to the control or data endpoint of the server.
-func (t *Tunnel) send(tun *knxnet.Tunnel, event knxnet.Event) {
-	to := t.control
+// sendPacket writes a packet of a connection to the control or data endpoint of the server.
+func sendPacket(conn *net.UDPConn, control *net.UDPAddr, tun *knxnet.Tunnel, event knxnet.Event) {
+	to := control
 
 	if data := tun.DataEndpoint(); event.ToData && !data.IsRouteBack() {
 		to = &net.UDPAddr{IP: net.IP(data.IP[:]), Port: int(data.Port)}
 
 		if to.IP.IsUnspecified() {
-			to.IP = t.control.IP
+			to.IP = control.IP
 		}
 	}
 
-	t.conn.WriteToUDP(event.Packet, to)
+	conn.WriteToUDP(event.Packet, to)
 }
 
 func confirmation(con *cemi.LDataCon) error {

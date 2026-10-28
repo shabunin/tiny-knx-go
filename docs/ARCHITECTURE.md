@@ -118,8 +118,18 @@ object table is ignored.
     like an IP BAOS; the ObjectServer is also served on a unix socket. Tested with the kBerry and
     the Serial BAOS 870: tunnel sessions of knxmon, then the ObjectServer back after the idle time,
     and the modules did not restart. `internal/sdk` serves the datapoints as JSON with the API of
-    dobaos (`-o json:`, `cmd/baosctl`). Next: the ObjectServer in KNXnet/IP search
-    responses (manufacturer DIB 0xFE, 00C5, F0 20) and over UDP (connection type 0xF0).
+    dobaos (`-o json:`, `cmd/baosctl`).
+11. ✅ The ObjectServer over KNXnet/IP, like an IP BAOS: `knxnet.Server` serves connections of type
+    0xF0 (ObjectServer requests 0xF080 and acknowledgements 0xF081, header version 2.0) next to
+    tunnels, and search responses carry the service family 0xF0 and the manufacturer DIB (0xFE,
+    00C5, record 01 04 F0 and the version, 0x10 or 0x20). Without tunnels a server announces
+    three families, so that the DIB comes at offset 76 as the ObjectServer protocol shows it.
+    `knxnet.Tunnel` opens such connections too, and `knxip.DialObjectServer` is a
+    `baos.Transport` over them (`baos:udp://`, `knxmon -port udp://HOST -baos`). `knxgw` serves
+    the ObjectServer at its knxip outputs in BAOS and auto mode. Tested with the BAOS Module 820
+    (1.x) through `knxgw -o knxip`: found by `knxmon -search`, datapoints read over UDP. Not yet
+    tested with a real IP BAOS or its clients; the version of the service family (the major
+    protocol version) is a guess.
 
 ## Hardware notes
 

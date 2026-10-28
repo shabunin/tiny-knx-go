@@ -36,6 +36,13 @@ func runAuto(input *gateway.Spec, outputs specs, trace bool) {
 
 	log.Printf("BAOS module on %s: %v at %v, in ObjectServer mode while no tunnel is open", port, protocol, addr)
 
+	// cEMI modules (kBerry, Serial BAOS 870) speak version 2 of the ObjectServer protocol, EMI2
+	// modules (BAOS 820) version 1.
+	version := objectServerVersion(baos.Version1)
+	if protocol == ft12.ProtocolCEMI {
+		version = objectServerVersion(baos.Version2)
+	}
+
 	a := gateway.NewAutoModule(gateway.AutoConfig{
 		OpenLink: func() (gateway.Uplink, error) {
 			m, err := gateway.OpenModule(port, baud)
@@ -58,7 +65,14 @@ func runAuto(input *gateway.Spec, outputs specs, trace bool) {
 	for _, out := range outputs {
 		switch out.Scheme {
 		case "knxip":
-			serveKNXIP(a.Attach, out, addr&^0xFF, []cemi.IndividualAddr{addr}, trace)
+			serveKNXIP(out, knxipOptions{
+				attach:       a.Attach,
+				lineAddr:     addr &^ 0xFF,
+				tunnels:      []cemi.IndividualAddr{addr},
+				objectServer: a.Hub.ServeKNXIP,
+				version:      version,
+				trace:        trace,
+			})
 			servers++
 
 		case "baos":

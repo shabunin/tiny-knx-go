@@ -13,7 +13,9 @@ import (
 	"sync"
 
 	"github.com/shabunin/tiny-knx-go/baos"
+	"github.com/shabunin/tiny-knx-go/knxnet"
 	"github.com/shabunin/tiny-knx-go/link/ft12"
+	"github.com/shabunin/tiny-knx-go/link/knxip"
 	"github.com/shabunin/tiny-knx-go/serial"
 )
 
@@ -65,6 +67,7 @@ func readBAOSFrame(r *bufio.Reader) ([]byte, error) {
 // BAOSMedia describes the media that OpenBAOS takes.
 const BAOSMedia = `  baos:PORT[?baud=19200]            BAOS module in ObjectServer mode on a serial port
   baos:tcp://HOST[:12004]           ObjectServer over TCP (IP BAOS, knxgw -o baos)
+  baos:udp://HOST[:3671]            ObjectServer over KNXnet/IP (IP BAOS, knxgw -o knxip)
   baos:unix:PATH                    ObjectServer on a unix socket (knxgw -o baos:/PATH)`
 
 // OpenBAOS connects to the ObjectServer of a spec of BAOSMedia. Opening a serial module switches it
@@ -87,6 +90,13 @@ func OpenBAOS(spec *Spec) (*baos.Client, error) {
 
 		tcp := newBAOSConn(conn)
 		t, closer = tcp, tcp
+	} else if host, ok := strings.CutPrefix(spec.Target, "udp://"); ok {
+		udp, err := knxip.DialObjectServer(host, knxnet.DefaultTunnelConfig)
+		if err != nil {
+			return nil, err
+		}
+
+		t, closer = udp, udp
 	} else if path, ok := strings.CutPrefix(spec.Target, "unix:"); ok {
 		conn, err := net.Dial("unix", path)
 		if err != nil {
@@ -297,13 +307,26 @@ func serveBAOSConn(conn net.Conn, h *BAOSHub) {
 		peer = addr.String()
 	}
 
-	c, gone := h.current()
-	if c == nil {
-		log.Printf("ObjectServer client %v turned away: the module is in data link layer mode", peer)
-		return
-	}
+	requests := make(chan []byte)
 
-	log.Printf("ObjectServer client %v connected", peer)
+	go func() {
+		defer close(requests)
+
+		r := bufio.NewReader(conn)
+
+		for {
+			req, err := readBAOSFrame(r)
+			if err != nil {
+				if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+					log.Printf("ObjectServer client %v: %v", peer, err)
+				}
+
+				return
+			}
+
+			requests <- req
+		}
+	}()
 
 	var writeMu sync.Mutex
 
@@ -315,6 +338,40 @@ func serveBAOSConn(conn net.Conn, h *BAOSHub) {
 
 		return err
 	}
+
+	serveBAOSClient(h, peer, requests, write, func() { conn.Close() })
+}
+
+// ServeKNXIP serves the ObjectServer of the hub on an ObjectServer connection of a KNXnet/IP server
+// (knxip.TunnelServerConfig.ObjectServer), like ServeBAOS.
+func (h *BAOSHub) ServeKNXIP(conn *knxip.ObjectServerConn) {
+	write := func(message []byte) error {
+		if !conn.Send(message) {
+			return net.ErrClosed
+		}
+
+		return nil
+	}
+
+	serveBAOSClient(h, fmt.Sprintf("on KNXnet/IP channel %d", conn.Channel), conn.Requests(), write, conn.Close)
+}
+
+// serveBAOSClient passes the requests of a client to the ObjectServer of the hub, and the responses
+// and all indications to write, until requests closes. It hangs up on the client when there is no
+// ObjectServer, when it goes away or when write fails.
+func serveBAOSClient(h *BAOSHub, peer string, requests <-chan []byte, write func(message []byte) error, hangUp func()) {
+	c, gone := h.current()
+	if c == nil {
+		log.Printf("ObjectServer client %v turned away: the module is in data link layer mode", peer)
+		hangUp()
+
+		for range requests {
+		}
+
+		return
+	}
+
+	log.Printf("ObjectServer client %v connected", peer)
 
 	indications, unsubscribe := h.Subscribe()
 	defer unsubscribe()
@@ -331,13 +388,13 @@ func serveBAOSConn(conn net.Conn, h *BAOSHub) {
 				}
 
 				if write(ind.Raw) != nil {
-					conn.Close()
+					hangUp()
 					return
 				}
 
 			case <-gone:
 				log.Printf("ObjectServer client %v: the ObjectServer went away", peer)
-				conn.Close()
+				hangUp()
 
 				return
 
@@ -347,16 +404,11 @@ func serveBAOSConn(conn net.Conn, h *BAOSHub) {
 		}
 	}()
 
-	r := bufio.NewReader(conn)
+	failed := false
 
-	for {
-		req, err := readBAOSFrame(r)
-		if err != nil {
-			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
-				log.Printf("ObjectServer client %v: %v", peer, err)
-			}
-
-			break
+	for req := range requests {
+		if failed {
+			continue // until the hang-up closes requests
 		}
 
 		res, err := c.Request(req)
@@ -366,7 +418,8 @@ func serveBAOSConn(conn net.Conn, h *BAOSHub) {
 		}
 
 		if err := write(res); err != nil {
-			break
+			failed = true
+			hangUp()
 		}
 	}
 

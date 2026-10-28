@@ -16,6 +16,11 @@ import (
 
 // TunnelConfig configures a Tunnel. Zero fields take the values of DefaultTunnelConfig.
 type TunnelConfig struct {
+	// Type is the type of the connection: TunnelConnection (the default), or
+	// ObjectServerConnection to the ObjectServer of an IP BAOS, which carries messages of the
+	// ObjectServer protocol (SendObjectServer) instead of cEMI messages.
+	Type ConnectionType
+
 	Layer TunnelLayer
 
 	// ConnectTimeout is how long to wait for the CONNECT_RESPONSE.
@@ -62,6 +67,7 @@ type TunnelSecure struct {
 
 // DefaultTunnelConfig contains the timings from the KNXnet/IP specification.
 var DefaultTunnelConfig = TunnelConfig{
+	Type:              TunnelConnection,
 	Layer:             TunnelLinkLayer,
 	ConnectTimeout:    10 * time.Second,
 	AckTimeout:        time.Second,
@@ -73,6 +79,10 @@ var DefaultTunnelConfig = TunnelConfig{
 
 func (cfg TunnelConfig) withDefaults() TunnelConfig {
 	d := DefaultTunnelConfig
+
+	if cfg.Type == 0 {
+		cfg.Type = d.Type
+	}
 
 	if cfg.Layer == 0 {
 		cfg.Layer = d.Layer
@@ -149,7 +159,8 @@ const (
 	EventDisconnected
 
 	// EventMessage delivers a cEMI message from the server, e.g. *cemi.LDataInd or
-	// *cemi.LDataCon.
+	// *cemi.LDataCon, or on an ObjectServer connection the message of the ObjectServer protocol
+	// in Data.
 	EventMessage
 
 	// EventAcked reports the server's answer to the last Send. Err is a Status if the server
@@ -165,6 +176,7 @@ type Event struct {
 	ToData  bool                // for EventSend
 	Address cemi.IndividualAddr // for EventConnected
 	Message cemi.Message        // for EventMessage
+	Data    []byte              // for EventMessage on an ObjectServer connection
 	Err     error               // for EventDisconnected and EventAcked
 }
 
@@ -267,7 +279,7 @@ func (t *Tunnel) Connect(now time.Time) {
 	t.setTimer(now, t.config.ConnectTimeout)
 
 	if t.config.Secure == nil {
-		t.send(&ConnectRequest{Type: TunnelConnection, Layer: t.config.Layer}, false)
+		t.send(&ConnectRequest{Type: t.config.Type, Layer: t.config.Layer}, false)
 	} else if err := t.requestSession(); err != nil {
 		t.close(err)
 	}
@@ -290,6 +302,16 @@ func (t *Tunnel) Disconnect(now time.Time) {
 // Send sends a cEMI message, usually *cemi.LDataReq, to the server. Only one request may be
 // unacknowledged at a time: wait for EventAcked before sending the next one.
 func (t *Tunnel) Send(now time.Time, msg cemi.Message) error {
+	return t.request(now, &TunnellingRequest{Channel: t.channel, Sequence: t.seqSend, Message: msg})
+}
+
+// SendObjectServer sends a message of the ObjectServer protocol on an ObjectServer connection, like
+// Send.
+func (t *Tunnel) SendObjectServer(now time.Time, message []byte) error {
+	return t.request(now, &ObjectServerRequest{Channel: t.channel, Sequence: t.seqSend, Message: message})
+}
+
+func (t *Tunnel) request(now time.Time, s Service) error {
 	if t.state != TunnelConnected {
 		return ErrNotConnected
 	}
@@ -298,7 +320,7 @@ func (t *Tunnel) Send(now time.Time, msg cemi.Message) error {
 		return ErrBusy
 	}
 
-	t.pending = Encode(&TunnellingRequest{Channel: t.channel, Sequence: t.seqSend, Message: msg})
+	t.pending = Encode(s)
 	t.repeated = false
 	t.out(t.pending, true)
 	t.setTimer(now, t.config.AckTimeout)
@@ -407,40 +429,59 @@ func (t *Tunnel) HandlePacket(now time.Time, packet []byte) {
 		}
 
 	case *TunnellingAck:
-		if t.state != TunnelConnected || s.Channel != t.channel || t.pending == nil ||
-			s.Sequence != t.seqSend {
-			return
-		}
+		t.acked(TunnelConnection, s.Channel, s.Sequence, s.Status)
 
-		t.pending = nil
-		t.timerSet = false
-
-		if s.Status != StatusOK {
-			t.emit(Event{Kind: EventAcked, Err: s.Status})
-			return
-		}
-
-		t.seqSend++
-		t.emit(Event{Kind: EventAcked})
+	case *ObjectServerAck:
+		t.acked(ObjectServerConnection, s.Channel, s.Sequence, s.Status)
 
 	case *TunnellingRequest:
-		if t.state != TunnelConnected || s.Channel != t.channel {
-			return
-		}
+		t.received(TunnelConnection, s.Channel, s.Sequence, Event{Kind: EventMessage, Message: s.Message})
 
-		switch s.Sequence {
-		case t.seqRecv:
-			t.ack(s.Sequence)
-			t.seqRecv++
-			t.emit(Event{Kind: EventMessage, Message: s.Message})
+	case *ObjectServerRequest:
+		t.received(ObjectServerConnection, s.Channel, s.Sequence, Event{Kind: EventMessage, Data: s.Message})
+	}
+}
 
-		case t.seqRecv - 1:
-			t.ack(s.Sequence) // our acknowledgement got lost
-		}
+func (t *Tunnel) acked(kind ConnectionType, channel, seq uint8, status Status) {
+	if t.state != TunnelConnected || kind != t.config.Type || channel != t.channel || t.pending == nil ||
+		seq != t.seqSend {
+		return
+	}
+
+	t.pending = nil
+	t.timerSet = false
+
+	if status != StatusOK {
+		t.emit(Event{Kind: EventAcked, Err: status})
+		return
+	}
+
+	t.seqSend++
+	t.emit(Event{Kind: EventAcked})
+}
+
+func (t *Tunnel) received(kind ConnectionType, channel, seq uint8, event Event) {
+	if t.state != TunnelConnected || kind != t.config.Type || channel != t.channel {
+		return
+	}
+
+	switch seq {
+	case t.seqRecv:
+		t.ack(seq)
+		t.seqRecv++
+		t.emit(event)
+
+	case t.seqRecv - 1:
+		t.ack(seq) // our acknowledgement got lost
 	}
 }
 
 func (t *Tunnel) ack(seq uint8) {
+	if t.config.Type == ObjectServerConnection {
+		t.send(&ObjectServerAck{Channel: t.channel, Sequence: seq}, true)
+		return
+	}
+
 	t.send(&TunnellingAck{Channel: t.channel, Sequence: seq}, true)
 }
 
@@ -586,7 +627,7 @@ func (t *Tunnel) sessionStatus(now time.Time, code SessionCode) {
 
 	case code == SessionAuthenticated && t.state == TunnelConnecting && !t.authenticated:
 		t.authenticated = true
-		t.send(&ConnectRequest{Type: TunnelConnection, Layer: t.config.Layer}, false)
+		t.send(&ConnectRequest{Type: t.config.Type, Layer: t.config.Layer}, false)
 		t.setTimer(now, t.config.ConnectTimeout)
 
 	case t.state != TunnelClosed:

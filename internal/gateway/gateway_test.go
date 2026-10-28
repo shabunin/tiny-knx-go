@@ -9,6 +9,8 @@ import (
 
 	"github.com/shabunin/tiny-knx-go/baos"
 	"github.com/shabunin/tiny-knx-go/cemi"
+	"github.com/shabunin/tiny-knx-go/knxnet"
+	"github.com/shabunin/tiny-knx-go/link/knxip"
 	"github.com/shabunin/tiny-knx-go/link/mock"
 )
 
@@ -104,7 +106,43 @@ func (s *objectServer) Send(req []byte) error {
 	return nil
 }
 
+// serveTCP serves the ObjectServer of the hub over TCP and returns the spec of a client.
+func serveTCP(t *testing.T, hub *BAOSHub) string {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { l.Close() })
+
+	go ServeBAOS(l, hub)
+
+	return "baos:tcp://" + l.Addr().String()
+}
+
+// serveUDP serves the ObjectServer of the hub over KNXnet/IP and returns the spec of a client.
+func serveUDP(t *testing.T, hub *BAOSHub) string {
+	control, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := knxip.NewTunnelServer(control, nil, knxip.TunnelServerConfig{
+		Server:       knxnet.ServerConfig{ObjectServer: 0x20},
+		ObjectServer: hub.ServeKNXIP,
+	})
+
+	t.Cleanup(func() { s.Close() })
+
+	return "baos:udp://" + control.LocalAddr().String()
+}
+
 func TestServeBAOS(t *testing.T) {
+	t.Run("tcp", func(t *testing.T) { testServeBAOS(t, serveTCP) })
+	t.Run("udp", func(t *testing.T) { testServeBAOS(t, serveUDP) })
+}
+
+func testServeBAOS(t *testing.T, serve func(*testing.T, *BAOSHub) string) {
 	server := &objectServer{inbound: make(chan []byte, 4)}
 
 	c, err := baos.NewClient(server, baos.Config{Version: baos.Version2})
@@ -112,18 +150,10 @@ func TestServeBAOS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
-
 	hub := NewBAOSHub()
 	hub.Use(c)
 
-	go ServeBAOS(l, hub)
-
-	spec, _ := ParseSpec("baos:tcp://" + l.Addr().String())
+	spec, _ := ParseSpec(serve(t, hub))
 
 	remote, err := OpenBAOS(spec)
 	if err != nil {

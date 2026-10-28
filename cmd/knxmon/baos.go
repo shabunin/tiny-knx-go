@@ -45,10 +45,10 @@ func runBAOS(port string, baud int, set, get string) {
 	}
 }
 
-// openObjectServer opens the ObjectServer of the module on a serial port, or of knxgw at tcp://HOST[:PORT]
-// or unix:PATH.
+// openObjectServer opens the ObjectServer of the module on a serial port, or of an IP BAOS or knxgw
+// at tcp://HOST[:PORT], udp://HOST[:PORT] (KNXnet/IP) or unix:PATH.
 func openObjectServer(port string, baud int) *baos.Client {
-	if strings.HasPrefix(port, "tcp://") || strings.HasPrefix(port, "unix:") {
+	if strings.HasPrefix(port, "tcp://") || strings.HasPrefix(port, "udp://") || strings.HasPrefix(port, "unix:") {
 		spec, err := gateway.ParseSpec("baos:" + port)
 		if err != nil {
 			log.Fatal(err)

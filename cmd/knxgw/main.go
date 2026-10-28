@@ -13,16 +13,18 @@
 //	knxgw -i routing:eth0 -o knxip:eth0?tunnels=1.1.250,1.1.251 # a tunnelling server for a router
 //
 // In BAOS mode the input is the ObjectServer of a BAOS module, with the datapoints that ETS
-// configured, and the outputs serve it like an IP BAOS (TCP port 12004) or print its indications:
+// configured, and the outputs serve it like an IP BAOS (TCP port 12004, and KNXnet/IP, where
+// clients find it by search) or print its indications:
 //
-//	knxgw -i baos:/dev/ttyAMA0 -o baos:wlan0 -o monitor
+//	knxgw -i baos:/dev/ttyAMA0 -o baos:wlan0 -o knxip:wlan0 -o monitor
 //	knxgw -i baos:tcp://192.168.2.29 -o monitor
 //
 // A module is in one mode at a time: ft12 switches it to data link layer mode, baos to
 // ObjectServer mode. ft12 restores the previous mode when knxgw ends. baos_auto switches it, like an
 // IP BAOS that is an ObjectServer and an interface at once: the module is in ObjectServer mode until
 // ETS opens a tunnel, in data link layer mode while the tunnel is open, and back in ObjectServer
-// mode a few seconds after it closed:
+// mode a few seconds after it closed. The knxip output also serves the ObjectServer, as an IP BAOS
+// does:
 //
 //	knxgw -i baos_auto:/dev/ttyAMA0 -o knxip:wlan0 -o baos:wlan0 -o baos:/run/knxgw.sock
 //
@@ -91,6 +93,9 @@ BAOS mode input:
 
 BAOS mode outputs:
   baos:[IFACE][?port=12004]         ObjectServer over TCP, like an IP BAOS
+  knxip:[IFACE][?port=3671&name=&address=]
+                                    ObjectServer over KNXnet/IP (UDP), like an IP BAOS, which
+                                    clients find by search
   baos:/PATH                        ObjectServer over a unix socket, the same frames
   json:/PATH[?names=FILE]           the datapoints as JSON on a unix socket, like dobaos (baosctl);
                                     FILE keeps the names of datapoints: {"room_temperature": 1}
@@ -101,8 +106,9 @@ Auto mode input:
                                     BAOS module in ObjectServer mode, switched to data link
                                     layer mode while a tunnel is open and for idle after
 
-Auto mode outputs: knxip (at least one), baos, json and monitor as above. While ETS has a tunnel, the
-ObjectServer is gone and its clients are turned away.
+Auto mode outputs: knxip (at least one), baos, json and monitor as above; knxip serves the tunnels
+and the ObjectServer. While ETS has a tunnel, the ObjectServer is gone and its clients are turned
+away.
 
 Options:
 `
@@ -222,7 +228,12 @@ func runLink(inputs, outputs specs, trace bool) {
 	)
 
 	for i, spec := range servers {
-		addr, list := serveKNXIP(func(addr cemi.IndividualAddr) link.Link { return bus.Attach(addr) }, spec, lineAddr, defaultTunnels, trace)
+		addr, list := serveKNXIP(spec, knxipOptions{
+			attach:   func(addr cemi.IndividualAddr) link.Link { return bus.Attach(addr) },
+			lineAddr: lineAddr,
+			tunnels:  defaultTunnels,
+			trace:    trace,
+		})
 		if i == 0 {
 			alias, tunnels = addr, list
 		}
@@ -258,27 +269,47 @@ func runLink(inputs, outputs specs, trace bool) {
 	commands(devices)
 }
 
-// serveKNXIP starts a tunnelling server of a knxip output and returns its address and tunnels.
-func serveKNXIP(attach func(cemi.IndividualAddr) link.Link, spec *gateway.Spec, lineAddr cemi.IndividualAddr, defaultTunnels []cemi.IndividualAddr, trace bool) (cemi.IndividualAddr, []cemi.IndividualAddr) {
+// knxipOptions tells what the KNXnet/IP server of a knxip output serves.
+type knxipOptions struct {
+	attach   func(cemi.IndividualAddr) link.Link // connects the tunnels to the line; nil: no tunnels
+	lineAddr cemi.IndividualAddr                 // the default address of the server
+	tunnels  []cemi.IndividualAddr               // the default addresses of the tunnels
+
+	objectServer func(*knxip.ObjectServerConn) // serves the ObjectServer connections; nil: none
+	version      uint8                         // of the ObjectServer protocol
+
+	trace bool
+}
+
+// serveKNXIP starts the KNXnet/IP server of a knxip output and returns its address and tunnels.
+func serveKNXIP(spec *gateway.Spec, opts knxipOptions) (cemi.IndividualAddr, []cemi.IndividualAddr) {
 	ifi, err := gateway.Interface(spec.Target)
 	check(err)
 
 	port, err := spec.Int("port", knxnet.Port)
 	check(err)
 
-	address, err := spec.Address("address", lineAddr)
+	address, err := spec.Address("address", opts.lineAddr)
 	check(err)
-
-	tunnels, err := spec.Addresses("tunnels")
-	check(err)
-
-	if len(tunnels) == 0 {
-		tunnels = defaultTunnels
-	}
 
 	name := spec.Get("name", "tiny-knx-go gateway")
-	password := spec.Get("password", "")
-	authCode := spec.Get("auth", "")
+
+	var tunnels []cemi.IndividualAddr
+
+	password, authCode := "", ""
+
+	if opts.attach != nil {
+		tunnels, err = spec.Addresses("tunnels")
+		check(err)
+
+		if len(tunnels) == 0 {
+			tunnels = opts.tunnels
+		}
+
+		password = spec.Get("password", "")
+		authCode = spec.Get("auth", "")
+	}
+
 	check(spec.Unused())
 
 	info := knxnet.DeviceInfo{
@@ -295,9 +326,14 @@ func serveKNXIP(attach func(cemi.IndividualAddr) link.Link, spec *gateway.Spec, 
 	}
 
 	config := knxip.TunnelServerConfig{
-		Server: knxnet.ServerConfig{Device: info, Tunnels: tunnels},
-		Attach: attach,
-		Log:    log.Printf,
+		Server:       knxnet.ServerConfig{Device: info, Tunnels: tunnels},
+		Attach:       opts.attach,
+		ObjectServer: opts.objectServer,
+		Log:          log.Printf,
+	}
+
+	if opts.objectServer != nil {
+		config.Server.ObjectServer = opts.version
 	}
 
 	if password != "" {
@@ -305,7 +341,7 @@ func serveKNXIP(attach func(cemi.IndividualAddr) link.Link, spec *gateway.Spec, 
 		log.Printf("%s: KNX IP Secure, users 1 to %d with the password", spec.Target, 1+len(tunnels))
 	}
 
-	if trace {
+	if opts.trace {
 		config.Trace = gateway.PrintPacket
 	}
 
@@ -319,8 +355,17 @@ func serveKNXIP(attach func(cemi.IndividualAddr) link.Link, spec *gateway.Spec, 
 		list = append(list, t.String())
 	}
 
+	serves := "tunnels " + strings.Join(list, ",")
+
+	switch {
+	case opts.objectServer != nil && len(tunnels) > 0:
+		serves += fmt.Sprintf(" and ObjectServer %d.%d", opts.version>>4, opts.version&0xF)
+	case opts.objectServer != nil:
+		serves = fmt.Sprintf("ObjectServer %d.%d", opts.version>>4, opts.version&0xF)
+	}
+
 	control := server.Control()
-	log.Printf("Serving %q at %v:%d, interface %v, tunnels %s", name, net.IP(control.IP[:]), control.Port, address, strings.Join(list, ","))
+	log.Printf("Serving %q at %v:%d, interface %v, %s", name, net.IP(control.IP[:]), control.Port, address, serves)
 
 	return address, tunnels
 }
@@ -439,6 +484,13 @@ func runBAOS(input *gateway.Spec, outputs specs) {
 		case "baos":
 			serveBAOS(out, hub)
 
+		case "knxip":
+			serveKNXIP(out, knxipOptions{
+				lineAddr:     cemi.NewIndividualAddr3(1, 1, 0),
+				objectServer: hub.ServeKNXIP,
+				version:      objectServerVersion(c.Version()),
+			})
+
 		case "json":
 			serveJSON(out, hub)
 
@@ -453,6 +505,12 @@ func runBAOS(input *gateway.Spec, outputs specs) {
 
 	<-gone
 	log.Fatal("The connection to the ObjectServer closed")
+}
+
+// objectServerVersion returns the version of the ObjectServer protocol that search responses
+// announce, e.g. 0x20 for 2.0.
+func objectServerVersion(v baos.Version) uint8 {
+	return uint8(v) << 4
 }
 
 // serveBAOS serves the ObjectServer of the hub at a baos output.
