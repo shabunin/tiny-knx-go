@@ -47,6 +47,7 @@ import (
 	"github.com/shabunin/tiny-knx-go/device"
 	"github.com/shabunin/tiny-knx-go/ets"
 	"github.com/shabunin/tiny-knx-go/internal/gateway"
+	"github.com/shabunin/tiny-knx-go/internal/logo"
 	"github.com/shabunin/tiny-knx-go/internal/vbus"
 	"github.com/shabunin/tiny-knx-go/knxnet"
 	"github.com/shabunin/tiny-knx-go/link"
@@ -80,6 +81,7 @@ func main() {
 	baud := flag.Int("baud", 19200, "baud rate of -serial")
 	uplinkTunnel := flag.String("tunnel", "", "connect the line to a real one through a tunnel to this KNXnet/IP interface (host[:port])")
 	moduleDevice := flag.Bool("module-device", false, "with -serial, host the module as device 1, so that ETS can assign its address")
+	logo.Print()
 	flag.Parse()
 
 	if *xmlDir != "" {

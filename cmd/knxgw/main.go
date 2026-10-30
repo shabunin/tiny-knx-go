@@ -50,6 +50,7 @@ import (
 	"github.com/shabunin/tiny-knx-go/cemi"
 	"github.com/shabunin/tiny-knx-go/device"
 	"github.com/shabunin/tiny-knx-go/internal/gateway"
+	"github.com/shabunin/tiny-knx-go/internal/logo"
 	"github.com/shabunin/tiny-knx-go/internal/sdk"
 	"github.com/shabunin/tiny-knx-go/knxnet"
 	"github.com/shabunin/tiny-knx-go/link"
@@ -123,6 +124,7 @@ func main() {
 		fmt.Fprintf(flag.CommandLine.Output(), usage, gateway.LineMedia, gateway.BAOSMedia)
 		flag.PrintDefaults()
 	}
+	logo.Print()
 	flag.Parse()
 
 	if len(inputs) == 0 || len(outputs) == 0 || flag.NArg() > 0 {

@@ -32,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shabunin/tiny-knx-go/internal/logo"
 	"github.com/shabunin/tiny-knx-go/internal/sdk"
 )
 
@@ -76,6 +77,7 @@ func main() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: baosctl [options] [COMMAND]\n\n%s\nWith a command, also: monitor (print values as they change).\n\nOptions:\n", help)
 		flag.PrintDefaults()
 	}
+	logo.Print()
 	flag.Parse()
 
 	loadConfig()

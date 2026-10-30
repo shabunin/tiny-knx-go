@@ -38,6 +38,7 @@ import (
 
 	"github.com/shabunin/tiny-knx-go/apdu"
 	"github.com/shabunin/tiny-knx-go/cemi"
+	"github.com/shabunin/tiny-knx-go/internal/logo"
 	"github.com/shabunin/tiny-knx-go/internal/pretty"
 	"github.com/shabunin/tiny-knx-go/knxnet"
 	"github.com/shabunin/tiny-knx-go/link"
@@ -83,6 +84,7 @@ func main() {
 	user := flag.Int("user", 2, "user ID for a secure tunnel, with -password")
 	password := flag.String("password", "", "open the tunnel in a KNX IP Secure session with this user password")
 	authCode := flag.String("auth", "", "device authentication code of the interface, checked if set (with -password)")
+	logo.Print()
 	flag.Parse()
 
 	var ifi *net.Interface
