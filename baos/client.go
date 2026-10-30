@@ -166,7 +166,11 @@ func (c *Client) detect() error {
 		}{{Version2, ItemProtocolVersion}, {Version1, ItemFirmwareVersion}} {
 			req, _ := AppendRangeRequest(nil, probe.v, GetServerItem, probe.item, 1)
 
-			_, err := c.request(probe.v, req, detectTimeout)
+			m, err := c.request(probe.v, req, detectTimeout)
+			if err == nil && m.Err() == ErrServiceNotSupported {
+				continue // a proxy of a server of the other version, like knxgw
+			}
+
 			if err == nil {
 				c.version.Store(uint32(probe.v))
 				return nil
@@ -308,12 +312,26 @@ func (c *Client) request(v Version, req []byte, timeout time.Duration) (Message,
 }
 
 // Request sends a raw ObjectServer request and returns the raw response, e.g. for a proxy that
-// passes the messages of its own clients. A request in the format of the other protocol version
-// fails at once with ErrMalformed, as the server would ignore it: clients that detect the version
-// ask in both.
+// passes the messages of its own clients. The server would ignore a request in the format of the
+// other protocol version: Request answers it at once with the negative response "service not
+// supported" in that format, so that clients that detect the version need not wait for a timeout.
 func (c *Client) Request(req []byte) ([]byte, error) {
-	if len(req) < 2 || req[0] != MainService || !c.Version().fits(req) {
+	if len(req) < 2 || req[0] != MainService {
 		return nil, ErrMalformed
+	}
+
+	v := c.Version()
+	if !v.fits(req) {
+		other := Version1
+		if v == Version1 {
+			other = Version2
+		}
+
+		if !other.fits(req) {
+			return nil, ErrMalformed
+		}
+
+		return AppendNegativeResponse(nil, other, req, ErrServiceNotSupported)
 	}
 
 	return c.exchange(req, c.config.Timeout)

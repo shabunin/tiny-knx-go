@@ -378,7 +378,7 @@ func (l *Link) SetAddress(addr cemi.IndividualAddr) error {
 		}
 
 		if current != addr {
-			return ErrPropertyFailed
+			return ErrAddressIgnored
 		}
 	} else if current != addr {
 		err := l.WriteProperty(cemi.ObjectTypeDevice, 1, cemi.PIDSubnetAddr, 1, []byte{byte(addr >> 8)})

@@ -125,11 +125,13 @@ object table is ignored.
     00C5, record 01 04 F0 and the version, 0x10 or 0x20). Without tunnels a server announces
     three families, so that the DIB comes at offset 76 as the ObjectServer protocol shows it.
     `knxnet.Tunnel` opens such connections too, and `knxip.DialObjectServer` is a
-    `baos.Transport` over them (`baos:udp://`, `knxmon -port udp://HOST -baos`). `knxgw` serves
-    the ObjectServer at its knxip outputs in BAOS and auto mode. Tested with the BAOS Module 820
-    (1.x) through `knxgw -o knxip`: found by `knxmon -search`, datapoints read over UDP. Not yet
-    tested with a real IP BAOS or its clients; the version of the service family (the major
-    protocol version) is a guess.
+    `baos.Transport` over them (`baos:udp://`, `knxmon -port udp://HOST -baos`). A request in the
+    other protocol version than the module's gets "service not supported" at once instead of the
+    silence of a module, so that clients detect the version without waiting for a timeout.
+    `knxgw` serves the ObjectServer at its knxip outputs in BAOS and auto mode. Tested with the
+    BAOS Module 820 (1.x) through `knxgw -o knxip`: found by `knxmon -search`, datapoints read
+    over UDP. Not yet tested with a real IP BAOS or its clients; the version of the service family
+    (the major protocol version) is a guess.
 
 ## Hardware notes
 
@@ -151,8 +153,9 @@ object table is ignored.
   `baos.NewClient` detects it. It has 250 datapoints and a 240-byte buffer, and reports the first ID
   it could not take in a negative response (buffer too small at the 79th description, bad ID 251).
   It ignores PC_GetValue/PC_SetValue, so its individual address is assigned over the bus, e.g.
-  `knxmon -serial-address`. Version 2 (kBerry) rejects server item ranges that start after its last
-  item (17) and answers "no element" for datapoint ranges without configured datapoints.
+  `knxmon -serial-address`; `SetAddress` returns `ErrAddressIgnored` (checked on the module).
+  Version 2 (kBerry) rejects server item ranges that start after its last item (17) and answers
+  "no element" for datapoint ranges without configured datapoints.
 - TinyGo's `machine.UART.Read` returns immediately when no data is buffered; the FT1.2 driver
   polls it every millisecond.
 - Frames we originate use control field 0xBC (low priority), the value ETS uses
@@ -160,7 +163,8 @@ object table is ignored.
 - A BAOS module occupies one individual address and only acknowledges and forwards point-to-point
   frames for it. A device on a kBerry therefore uses the module's address: `device.Run` sets it
   through `ft12.Link.SetAddress`, which writes `PID_SUBNET_ADDR` (57) and `PID_DEVICE_ADDR` (58) of
-  the device object, and only when the address differs. Not yet verified on real hardware.
+  the device object, and only when the address differs. Checked on a kBerry: the address changes
+  and survives reopening the module.
 - KNXnet/IP was tested against Calimero server 3.0 (tunnelling, and routing as a KNX IP router)
   and xknx 4.0 (routing): group telegrams both ways, and `knxmon -info` through a Calimero tunnel to
   a `device` on routing. The tunnel uses route-back HPAIs (0.0.0.0:0), which works through NAT.

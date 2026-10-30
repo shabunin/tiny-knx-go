@@ -3,6 +3,7 @@ package ft12
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 
@@ -25,7 +26,11 @@ func (m *fakeModule) respondEMI(payload []byte) {
 		m.sendPayload([]byte{emiPEIIdentifyCon, byte(addr >> 8), byte(addr), 0x00, 0xc5, 0x01, 0x00, 0x41, 0x22})
 
 	case emiPCSetValueReq:
-		if bytes.Equal(payload[:4], []byte{emiPCSetValueReq, 2, 0x01, 0x17}) {
+		m.mu.Lock()
+		ignore := m.noPCSet
+		m.mu.Unlock()
+
+		if !ignore && bytes.Equal(payload[:4], []byte{emiPCSetValueReq, 2, 0x01, 0x17}) {
 			m.mu.Lock()
 			m.address = cemi.IndividualAddr(payload[4])<<8 | cemi.IndividualAddr(payload[5])
 			m.writes++
@@ -193,6 +198,22 @@ func TestEMISetAddress(t *testing.T) {
 
 	if module.address != newAddr || module.writes != 1 || l.Address() != newAddr {
 		t.Errorf("Module address %v after %d writes, link address %v", module.address, module.writes, l.Address())
+	}
+}
+
+func TestEMISetAddressIgnored(t *testing.T) {
+	l, module := openEMITestLink(t, ProtocolEMI2)
+
+	module.mu.Lock()
+	module.noPCSet = true
+	module.mu.Unlock()
+
+	if err := l.SetAddress(cemi.NewIndividualAddr3(1, 1, 77)); !errors.Is(err, ErrAddressIgnored) {
+		t.Errorf("SetAddress: %v", err)
+	}
+
+	if l.Address() != moduleAddr {
+		t.Errorf("Link address %v", l.Address())
 	}
 }
 

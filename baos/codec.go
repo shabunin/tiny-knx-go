@@ -45,6 +45,20 @@ func (v Version) fits(req []byte) bool {
 	return len(req) == want
 }
 
+// AppendNegativeResponse appends the negative response with the error code to a request of
+// version v.
+func AppendNegativeResponse(b []byte, v Version, req []byte, code ErrorCode) ([]byte, error) {
+	m, err := Parse(v, req)
+	if err != nil {
+		return b, err
+	}
+
+	b = append(b, MainService, m.Service|ResponseFlag)
+	b = appendWord(b, v, m.Start)
+
+	return append(appendWord(b, v, 0), byte(code)), nil
+}
+
 func appendWord(b []byte, v Version, x uint16) []byte {
 	if v == Version1 {
 		return append(b, byte(x))

@@ -374,9 +374,54 @@ func TestClientRawRequest(t *testing.T) {
 		t.Errorf("not an ObjectServer message: %v", err)
 	}
 
-	// A version 1 request, which a version 2 server would ignore.
-	if _, err := c.Request([]byte{0xf0, 0x01, 0x03, 0x01}); err != ErrMalformed {
-		t.Errorf("version 1 request: %v", err)
+	// A version 1 request, which a version 2 server would ignore, gets a negative response in its
+	// format.
+	res, err = c.Request([]byte{0xf0, 0x01, 0x03, 0x01})
+	if err != nil || !bytes.Equal(res, []byte{0xf0, 0x81, 0x03, 0x00, 0x05}) {
+		t.Errorf("version 1 request: % x, %v", res, err)
+	}
+
+	if _, err := c.Request([]byte{0xf0, 0x01, 0x03}); err != ErrMalformed {
+		t.Errorf("request of neither version: %v", err)
+	}
+}
+
+// proxyTransport passes requests to the ObjectServer of a client, like knxgw.
+type proxyTransport struct {
+	c       *Client
+	inbound chan []byte
+}
+
+func (p proxyTransport) Inbound() <-chan []byte { return p.inbound }
+
+func (p proxyTransport) Send(req []byte) error {
+	go func() {
+		if res, err := p.c.Request(req); err == nil {
+			p.inbound <- res
+		}
+	}()
+
+	return nil
+}
+
+func TestClientDetectsVersionThroughProxy(t *testing.T) {
+	for _, v := range []Version{Version1, Version2} {
+		proxy, err := NewClient(newFakeServer(v), Config{})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		start := time.Now()
+
+		c, err := NewClient(proxyTransport{proxy, make(chan []byte, 16)}, Config{})
+		if err != nil || c.Version() != v {
+			t.Fatalf("v%d: %v, version %d", v, err, c.Version())
+		}
+
+		// The proxy answers the probe of the other version at once.
+		if d := time.Since(start); d > detectTimeout/2 {
+			t.Errorf("v%d: detection took %v", v, d)
+		}
 	}
 }
 

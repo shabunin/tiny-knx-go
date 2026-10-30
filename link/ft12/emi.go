@@ -14,6 +14,10 @@ var ErrFrameTooLong = errors.New("ft12: EMI2 modules only send standard frames")
 // objects.
 var ErrNotSupported = errors.New("ft12: not supported by EMI2 modules")
 
+// ErrAddressIgnored is returned by SetAddress when an EMI2 module ignores PC_SetValue, as the BAOS
+// Module 820 does. Its address can be assigned over the bus, e.g. by serial number.
+var ErrAddressIgnored = errors.New("ft12: the EMI2 module ignored the new address; assign it over the bus")
+
 // Protocol is the message format of a module: cEMI for current modules such as kBerry, EMI2 for
 // older BCU2-based interfaces such as the first BAOS modules.
 type Protocol uint32

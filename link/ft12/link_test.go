@@ -96,6 +96,7 @@ type fakeModule struct {
 
 	emi2    bool   // speaks EMI2 instead of cEMI
 	emiMode []byte // last PEI_Switch.req
+	noPCSet bool   // ignores PC_SetValue, like the BAOS Module 820
 }
 
 func newFakeModule(port *pipePort) *fakeModule {
