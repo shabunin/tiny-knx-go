@@ -105,7 +105,7 @@ func listenFor(address string) (*net.UDPConn, *net.UDPAddr, error) {
 		return nil, nil, err
 	}
 
-	conn, err := net.ListenUDP("udp4", nil)
+	conn, err := openSocket(control)
 	if err != nil {
 		return nil, nil, err
 	}

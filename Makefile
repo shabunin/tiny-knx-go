@@ -27,6 +27,7 @@ tinygo-build:
 	mkdir -p $(BUILD)
 	for b in $(BOARDS); do tinygo build -target=$$b -o $(BUILD)/smoke-$$b.bin ./examples/smoke || exit 1; done
 	tinygo build -target=pico -o $(BUILD)/pico-kberry.uf2 ./examples/pico-kberry
+	cd examples/cardputer && tinygo build -target=m5stamp-s3a -o ../../$(BUILD)/cardputer.bin .
 
 clean:
 	rm -rf $(BUILD)

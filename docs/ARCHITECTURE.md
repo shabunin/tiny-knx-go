@@ -39,7 +39,7 @@ Arduino, with the bus connection and the configuration source kept pluggable.
  link       Link interface                                done
    ft12       BAOS / kBerry over FT1.2 (cEMI LL mode)      done
    tpuart     NCN5120 / TP-UART2                           done (no hardware test)
-   knxip      KNXnet/IP routing, tunnelling client/server  done (host only: uses net)
+   knxip      KNXnet/IP routing, tunnelling client/server  done (uses net; TinyGo: the client)
    mock       in-memory bus for tests and knxvbus          done
  ─────────────────────────────────────────────────────────
  port       io.ReadWriter: machine.UART (TinyGo), serial.Open (Linux), net.Conn
@@ -158,6 +158,10 @@ object table is ignored.
   "no element" for datapoint ranges without configured datapoints.
 - TinyGo's `machine.UART.Read` returns immediately when no data is buffered; the FT1.2 driver
   polls it every millisecond.
+- Under TinyGo, `link/knxip` has only the tunnelling and ObjectServer clients: TinyGo's `net` has
+  no multicast. Its UDP sockets are connected (netdev), so the client sends everything to the
+  control endpoint and takes every packet as the server's; servers that want data at another
+  endpoint don't work. Checked on a Cardputer (ESP32-S3, espradio) with a knxvbus tunnel.
 - Frames we originate use control field 0xBC (low priority), the value ETS uses
   (`cemi.Control1Request`).
 - A BAOS module occupies one individual address and only acknowledges and forwards point-to-point

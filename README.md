@@ -72,6 +72,7 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | Path | Description |
 | :--- | :--- |
 | `examples/pico-kberry` | Switch actuator: Pico + kBerry, LED on 1/1/1, status on 1/1/2, programming button |
+| `examples/cardputer` | Pocket KNX tool on the M5Stack Cardputer (ESP32-S3): a tunnel over Wi-Fi, the bus on its screen, group reads and writes from its keyboard. A module of its own, for the TinyGo drivers |
 | `examples/smoke` | Encodes a frame and a value; `make check` builds it for the Pico, ESP32 and ESP32-C3 and runs it on an emulated Cortex-M |
 
 The core packages use no `reflect`, no `net` and no third-party modules. Only `link/knxip`,
@@ -124,6 +125,15 @@ button GP15 → GND and LED on GP14):
 
 ```sh
 tinygo flash -target=pico ./examples/pico-kberry
+```
+
+On an M5Stack Cardputer, the tunnel client works over Wi-Fi (TinyGo 0.44 or later). It shows the
+telegrams of the line and takes `w 1/1/1 on`, `w 1/1/3 40%`, `w 1/3/2 21.5` and `r 1/3/1`:
+
+```sh
+cd examples/cardputer
+tinygo flash -target=m5stamp-s3a -port /dev/ttyACM0 \
+  -ldflags "-X main.ssid=SSID -X main.password=PASSWORD -X main.gateway=192.168.1.10" .
 ```
 
 ## A gateway between media

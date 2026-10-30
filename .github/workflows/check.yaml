@@ -27,7 +27,7 @@ jobs:
           cache: false
       - uses: acifani/setup-tinygo@v3
         with:
-          tinygo-version: 0.42.0
+          tinygo-version: 0.44.0
           install-binaryen: false  # only for WebAssembly
       # The QEMU packages are cached: the Ubuntu mirror of the runners is sometimes very slow.
       # RISC-V is in qemu-system-riscv since Ubuntu 26.04 (QEMU 10), no longer in qemu-system-misc.
