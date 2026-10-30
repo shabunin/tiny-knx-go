@@ -38,7 +38,7 @@ Arduino, with the bus connection and the configuration source kept pluggable.
  ─────────────────────────────────────────────────────────
  link       Link interface                                done
    ft12       BAOS / kBerry over FT1.2 (cEMI LL mode)      done
-   tpuart     NCN5120 / TP-UART2                           done (no hardware test)
+   tpuart     NCN5120 / TP-UART2                           done (NCN5120 receive checked)
    knxip      KNXnet/IP routing, tunnelling client/server  done (uses net; TinyGo: the client)
    mock       in-memory bus for tests and knxvbus          done
  ─────────────────────────────────────────────────────────
@@ -181,8 +181,11 @@ object table is ignored.
   devices. Seen with `knxmon -props 7.1.0`; a new tunnel address works again.
 - Go's `net.ListenMulticastUDP` disables multicast loopback, so `knxip.Router` sends from a second
   socket; otherwise programs on the same host would not see each other's frames.
-- TP-UART: no hardware available yet. Behaviour follows the thelsing stack (echo filtering, no
-  acknowledgement while sending, U_SetAddress on both chips). By default every group telegram is
+- TP-UART: behaviour follows the thelsing stack (echo filtering, no acknowledgement while
+  sending, U_SetAddress on both chips). Checked on the NCN5120 of a Wiren Board 7 KNX module
+  (WBE2-I-KNX), which runs at 38400 baud (`knxmon -tpuart -baud 38400`): reset, address and
+  received group telegrams. Sending and acknowledgement timing are not checked yet; a TP-UART2
+  has not been tried. By default every group telegram is
   acknowledged; set `tpuart.Config.AcceptGroup` to acknowledge only the device's group addresses.
 - `knxip.TunnelServer` follows the thelsing stack: tunnel connections (link layer only) and
   device management connections, whose M_PropRead requests are answered from the server
