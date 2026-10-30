@@ -72,7 +72,7 @@ func main() {
 	etsDevices := flag.String("ets", "", "individual addresses of ETS-programmable knx-demo devices")
 	data := flag.String("data", "knxvbus-data", "directory for the configuration of ETS devices")
 	trace := flag.Bool("trace", false, "print the KNXnet/IP packets")
-	sim := flag.String("sim", "", "simulated devices that ETS programs, e.g. switch,dimmer@1.1.20 (types: "+simTypes()+")")
+	sim := flag.String("sim", "", "simulated devices that ETS programs, e.g. switch,dimmer@1.1.20, with group addresses until then: 'switch=1/1/1 1/1/2' (types: "+simTypes()+")")
 	speed := flag.Float64("speed", 5, "how much faster than real time room temperatures change")
 	xmlDir := flag.String("xml", "", "write the ETS product databases of the simulated devices to this directory and exit")
 	password := flag.String("password", "", "enable KNX IP Secure: the password of the management user 1 and the tunnelling users")

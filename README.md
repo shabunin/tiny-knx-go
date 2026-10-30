@@ -311,6 +311,15 @@ section "tiny-knx-go"). Every simulated device starts at 15.15.255, or at the ad
 `dimmer@1.1.20`; program them one by one with `p N`. Parameters and group objects are those of
 `internal/vbus/products.go`; a device keeps its defaults until ETS downloads its application.
 
+Without ETS, group addresses for the objects of a device follow its type, in the order of its
+objects (`-` skips one); the objects then have the flags of the product. A dimmer, and a
+thermostat that controls a heater:
+
+```sh
+go run ./cmd/knxvbus -iface eth0 -devices '' -monitor \
+  -sim 'dimmer@1.1.20=1/1/1 1/1/2 1/1/3 1/1/4 1/1/5,thermostat@1.1.30=1/3/1 1/3/2 1/3/3 -,heater@1.1.31=1/3/3 - 1/3/4'
+```
+
 Commands for the simulation:
 
 ```

@@ -65,8 +65,10 @@ func simTypes() string {
 }
 
 // startSimulated runs a simulated device that ETS programs. spec is its type, optionally with the
-// address before programming, e.g. "dimmer@1.1.20"; the default is 15.15.255.
+// address before programming, e.g. "dimmer@1.1.20"; the default is 15.15.255. Group addresses for
+// its objects may follow, used until ETS programs it: "switch=1/1/1 1/1/2", "-" skips an object.
 func startSimulated(bus *mock.Bus, number int, spec, dir string, env *vbus.Env) *hostedDevice {
+	spec, groups, _ := strings.Cut(spec, "=")
 	kind, at, _ := strings.Cut(spec, "@")
 
 	p, ok := vbus.Products[kind]
@@ -87,7 +89,31 @@ func startSimulated(bus *mock.Bus, number int, spec, dir string, env *vbus.Env) 
 	var app vbus.App
 	params := &checkedParams{p: p, logf: logf}
 
-	d, e := startProgrammable(bus, number, addr, dir, device.Identity{SerialNumber: serial, OrderNumber: p.OrderNumber}, p.Objects(), func() {
+	// Until ETS programs it, the objects with group addresses get the flags of the product.
+	objects := p.Objects()
+
+	var flags []device.Flags
+	for _, b := range p.Blocks {
+		for _, o := range b.Objects {
+			flags = append(flags, o.Flags)
+		}
+	}
+
+	for i, g := range strings.Fields(groups) {
+		if g == "-" {
+			continue
+		}
+
+		ga, err := cemi.NewGroupAddrString(g)
+		if err != nil || i >= len(objects) {
+			log.Fatalf("Device %d (%s): bad group address %q for object %d", number, kind, g, i+1)
+		}
+
+		objects[i].Addresses = []cemi.GroupAddr{ga}
+		objects[i].Flags = flags[i]
+	}
+
+	d, e := startProgrammable(bus, number, addr, dir, device.Identity{SerialNumber: serial, OrderNumber: p.OrderNumber}, objects, func() {
 		params.check()
 		app.Configure()
 	})
