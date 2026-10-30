@@ -38,7 +38,7 @@ Arduino, with the bus connection and the configuration source kept pluggable.
  ─────────────────────────────────────────────────────────
  link       Link interface                                done
    ft12       BAOS / kBerry over FT1.2 (cEMI LL mode)      done
-   tpuart     NCN5120 / TP-UART2                           done (NCN5120 receive checked)
+   tpuart     NCN5120 / TP-UART2                           done (checked on an NCN5120)
    knxip      KNXnet/IP routing, tunnelling client/server  done (uses net; TinyGo: the client)
    mock       in-memory bus for tests and knxvbus          done
  ─────────────────────────────────────────────────────────
@@ -183,9 +183,13 @@ object table is ignored.
   socket; otherwise programs on the same host would not see each other's frames.
 - TP-UART: behaviour follows the thelsing stack (echo filtering, no acknowledgement while
   sending, U_SetAddress on both chips). Checked on the NCN5120 of a Wiren Board 7 KNX module
-  (WBE2-I-KNX), which runs at 38400 baud (`knxmon -tpuart -baud 38400`): reset, address and
-  received group telegrams. Sending and acknowledgement timing are not checked yet; a TP-UART2
-  has not been tried. By default every group telegram is
+  (WBE2-I-KNX), which is strapped for 38400 baud and 8 bits without parity (`knxmon -tpuart
+  -baud 38400 -parity none`; NCN512x pins select 8N1 or 8E1 apart from the speed). With even
+  parity the chip still answers a reset but rejects frames (U_State.ind with errors, no
+  L_Data.con), while receiving seems to work. Reset, address, receiving, sending with L_Data.con
+  and the echo of our own frames, group reads (responses within 20 ms) and writes (a setpoint of
+  a Zennio HVAC interface moved and back, with its status following), a line scan and device
+  information (transport connections) all work. A TP-UART2 has not been tried. By default every group telegram is
   acknowledged; set `tpuart.Config.AcceptGroup` to acknowledge only the device's group addresses.
 - `knxip.TunnelServer` follows the thelsing stack: tunnel connections (link layer only) and
   device management connections, whose M_PropRead requests are answered from the server

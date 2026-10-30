@@ -101,7 +101,8 @@ GOOS=linux GOARCH=arm64 go build ./cmd/knxmon   # GOARCH=arm GOARM=6 for 32-bit 
 ./knxmon -port /dev/serial0 -address 1.1.250    # change the kBerry's own individual address
 ./knxmon -tunnel 192.168.1.10                   # through a KNXnet/IP interface or router
 ./knxmon -router -iface eth0 -address 1.1.254   # KNXnet/IP routing (multicast 224.0.23.12)
-./knxmon -port /dev/ttyUSB0 -tpuart             # TP-UART / NCN5120 (-chip tpuart2 for Siemens; -baud 38400 if strapped so)
+./knxmon -port /dev/ttyUSB0 -tpuart             # TP-UART / NCN5120 (-chip tpuart2 for Siemens)
+./knxmon -port /dev/ttyKNX -tpuart -baud 38400 -parity none  # NCN5120 strapped for 38400 8N1 (Wiren Board)
 ./knxmon -search                                # find KNXnet/IP interfaces and routers
 ./knxmon -port /dev/serial0 -scan 1.1           # list the devices of line 1.1
 ./knxmon -port /dev/serial0 -props 1.1.3        # dump all interface objects and properties

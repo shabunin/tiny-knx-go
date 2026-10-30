@@ -41,8 +41,9 @@ type Line struct {
 const LineMedia = `  ft12:PORT[?baud=19200&device]     BAOS module (cEMI, kBerry) or EMI2 interface; ETS reaches a
                                     cEMI module itself through the tunnel; device hosts an EMI2
                                     module as a device, so that ETS can assign its address
-  tpuart:PORT[?baud=19200&chip=ncn5120|tpuart2&address=15.15.255]
-                                    TP-UART or NCN5120 transceiver
+  tpuart:PORT[?baud=19200&parity=even|none&chip=ncn5120|tpuart2&address=15.15.255]
+                                    TP-UART or NCN5120 transceiver; an NCN512x
+                                    may be strapped for 8 bits without parity
   tunnel:HOST[:PORT][?user=2&password=&auth=]
                                     tunnel to another KNXnet/IP interface, secure with password
   routing:IFACE[?address=0.0.0]     KNXnet/IP routing (multicast 224.0.23.12)`
@@ -89,7 +90,12 @@ func OpenLine(spec *Spec) (*Line, error) {
 			return nil, fmt.Errorf("%s: unknown chip %q", spec, chip)
 		}
 
-		port, err := serial.Open(spec.Target, baud, serial.ParityEven)
+		parity, err := ParseParity(spec.Get("parity", "even"))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %v", spec, err)
+		}
+
+		port, err := serial.Open(spec.Target, baud, parity)
 		if err != nil {
 			return nil, err
 		}
@@ -159,6 +165,20 @@ func OpenLine(spec *Spec) (*Line, error) {
 	CloseOnSignal(l)
 
 	return l, nil
+}
+
+// ParseParity parses the parity of a serial port: even, none or odd.
+func ParseParity(s string) (serial.Parity, error) {
+	switch s {
+	case "even":
+		return serial.ParityEven, nil
+	case "none":
+		return serial.ParityNone, nil
+	case "odd":
+		return serial.ParityOdd, nil
+	}
+
+	return 0, fmt.Errorf("unknown parity %q: want even, none or odd", s)
 }
 
 // OpenModule opens a serial module in data link layer mode and reads its address. Closing it

@@ -11,6 +11,7 @@
 //	knxmon -port /dev/serial0 -info 1.1.3        # connect to a device and read its identity
 //	knxmon -port /dev/serial0 -address 1.1.250   # change the module's own address
 //	knxmon -port /dev/ttyUSB0 -tpuart            # TP-UART or NCN5120 instead of a BAOS module
+//	knxmon -port /dev/ttyKNX -tpuart -baud 38400 -parity none  # NCN5120 of a Wiren Board
 //	knxmon -tunnel 192.168.1.10                  # KNXnet/IP tunnelling
 //	knxmon -router -iface eth0 -address 1.1.254  # KNXnet/IP routing
 //	knxmon -search                               # find KNXnet/IP interfaces and routers
@@ -63,6 +64,7 @@ func main() {
 	baud := flag.Int("baud", 19200, "baud rate")
 	useTPUART := flag.Bool("tpuart", false, "the serial port has a TP-UART or NCN5120")
 	chip := flag.String("chip", "ncn5120", "TP-UART chip: ncn5120 or tpuart2")
+	parity := flag.String("parity", "even", "parity of the TP-UART: even, or none for an NCN512x strapped for 8 bits")
 	tunnel := flag.String("tunnel", "", "connect to this KNXnet/IP server (host[:port])")
 	router := flag.Bool("router", false, "use KNXnet/IP routing (224.0.23.12)")
 	iface := flag.String("iface", "", "network interface for routing and search")
@@ -158,7 +160,21 @@ func main() {
 			config.Chip = tpuart.ChipTPUART2
 		}
 
-		t, err := tpuart.Open(openSerial(*port, *baud), config)
+		p := serial.ParityEven
+		switch *parity {
+		case "even":
+		case "none":
+			p = serial.ParityNone
+		default:
+			log.Fatalf("-parity: want even or none, not %q", *parity)
+		}
+
+		file, err := serial.Open(*port, *baud, p)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		t, err := tpuart.Open(file, config)
 		if err != nil {
 			log.Fatalf("Opening TP-UART on %s: %v", *port, err)
 		}
