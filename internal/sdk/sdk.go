@@ -46,9 +46,9 @@ type Response struct {
 type Description struct {
 	ID            uint16 `json:"id"`
 	Name          string `json:"name,omitempty"`
-	Type          string `json:"type"` // e.g. "dpt9", or "unknown"
-	Size          int    `json:"size"` // in bits
-	Priority      string `json:"priority"`
+	Type          int    `json:"type"`           // the main DPT as dobaos gives it, e.g. 9, or 0 if unknown
+	Size          int    `json:"size,omitempty"` // in bits; not with SetBare
+	Priority      int    `json:"priority"`       // 0 system, 1 high, 2 alarm, 3 low
 	Communication bool   `json:"communication"`
 	Read          bool   `json:"read"`
 	Write         bool   `json:"write"`
@@ -83,7 +83,8 @@ var (
 	ErrPayload            = errors.New("ERR_WRONG_PAYLOAD")
 	ErrPayloadType        = errors.New("ERR_WRONG_PAYLOAD_TYPE")
 	ErrDatapointNotFound  = errors.New("ERR_DATAPOINT_NOT_FOUND")
-	ErrNoObjectServer     = errors.New("ERR_NO_OBJECT_SERVER") // the module is in data link layer mode
+	ErrOutOfBounds        = errors.New("ERR_DATAPOINT_OUT_OF_BOUNDS") // an ID outside 1 to 1000
+	ErrNoObjectServer     = errors.New("ERR_NO_OBJECT_SERVER")        // the module is in data link layer mode
 	ErrValuePayload       = errors.New("ERR_WRONG_VALUE_PAYLOAD")
 	ErrWrongRawValue      = errors.New("ERR_WRONG_RAW_VALUE")
 	ErrDescriptionsFailed = errors.New("ERR_DESCRIPTIONS")
@@ -125,12 +126,14 @@ type Server struct {
 	idNames   map[uint16]string
 
 	mu           sync.Mutex
+	bare         bool
 	client       *baos.Client // the one that the descriptions are of
 	descriptions map[uint16]baos.Description
 	stored       map[uint16]Value
 
-	connsMu sync.Mutex
-	conns   map[*conn]bool
+	connsMu   sync.Mutex
+	conns     map[*conn]bool
+	listeners []func(Response)
 }
 
 // NewServer returns a server of the hub. Datapoints may have names, which requests may use
@@ -159,6 +162,35 @@ func NewServer(hub Hub, namesFile string) (*Server, error) {
 	go s.broadcastIndications()
 
 	return s, nil
+}
+
+// SetBare leaves out what dobaos does not send: the size in descriptions and the valid flag of
+// values.
+func (s *Server) SetBare(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.bare = on
+}
+
+// Listen calls f with every broadcast, e.g. to pass them on to other clients than those of Serve.
+func (s *Server) Listen(f func(Response)) {
+	s.connsMu.Lock()
+	defer s.connsMu.Unlock()
+
+	s.listeners = append(s.listeners, f)
+}
+
+// SetNames replaces the names of the datapoints, e.g. with names kept elsewhere than in the names
+// file, which it does not write.
+func (s *Server) SetNames(names map[string]uint16) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.names, s.idNames = map[string]uint16{}, map[uint16]string{}
+	for name, id := range names {
+		s.names[name], s.idNames[id] = id, name
+	}
 }
 
 // setName gives a datapoint a name, or takes its name if name is empty. It is called with mu held.
@@ -254,6 +286,10 @@ func (s *Server) broadcast(r Response) {
 		if c.send(r) != nil {
 			c.nc.Close()
 		}
+	}
+
+	for _, f := range s.listeners {
+		f(r)
 	}
 }
 
@@ -463,6 +499,24 @@ func (s *Server) handle(req Request) (any, error) {
 		}
 
 		return items(got), nil
+
+	case "binary request":
+		text, ok := payload.(string)
+		if !ok {
+			return nil, ErrPayloadType
+		}
+
+		req, err := base64.StdEncoding.DecodeString(text)
+		if err != nil {
+			return nil, ErrPayload
+		}
+
+		res, err := c.Request(req)
+		if err != nil {
+			return nil, err
+		}
+
+		return base64.StdEncoding.EncodeToString(res), nil
 	}
 
 	return nil, ErrUnknownMethod
@@ -483,20 +537,31 @@ func items(list []baos.Item) []Item {
 	return out
 }
 
-var priorities = [...]string{"system", "high", "alarm", "low"}
-
 func (s *Server) describe(d baos.Description) Description {
 	f := d.Flags
-	typ := "unknown"
-	if main := mainType(d); main != 0 {
-		typ = fmt.Sprintf("dpt%d", main)
-	}
 
 	return Description{
-		ID: d.ID, Name: s.idNames[d.ID], Type: typ, Size: d.ValueType.Bits(), Priority: priorities[f.Priority()],
+		ID: d.ID, Name: s.idNames[d.ID], Type: mainType(d), Size: s.size(d), Priority: int(f.Priority()),
 		Communication: f.Communication(), Read: f.Read(), Write: f.Write(), ReadOnInit: f.ReadOnInit(),
 		Transmit: f.Transmit(), Update: f.UpdateOnResponse(),
 	}
+}
+
+func (s *Server) size(d baos.Description) int {
+	if s.bare {
+		return 0
+	}
+
+	return d.ValueType.Bits()
+}
+
+// invalid returns the valid flag of a value that is not valid.
+func (s *Server) invalid() *bool {
+	if s.bare {
+		return nil
+	}
+
+	return new(bool)
 }
 
 // value converts a value of the server. A value that a client set without sending it is not
@@ -504,7 +569,7 @@ func (s *Server) describe(d baos.Description) Description {
 func (s *Server) value(d baos.Description, v baos.Value) Value {
 	value := Value{ID: v.ID, Name: s.idNames[v.ID], Value: decodeValue(d, v.Data), Raw: v.Data}
 	if !v.State.Valid {
-		value.Valid = new(bool)
+		value.Valid = s.invalid()
 	}
 
 	return value
@@ -517,6 +582,10 @@ func (s *Server) id(v any) (uint16, error) {
 		id := uint16(v)
 		if float64(id) != v {
 			return 0, ErrPayload
+		}
+
+		if id < 1 || id > 1000 {
+			return 0, ErrOutOfBounds
 		}
 
 		if _, ok := s.descriptions[id]; !ok {
@@ -581,6 +650,10 @@ func (s *Server) ids(payload any) (ids []uint16, one bool, err error) {
 // each returns the result of f for the datapoints of the payload.
 func (s *Server) each(payload any, f func(id uint16) any) (any, error) {
 	ids, one, err := s.ids(payload)
+	if errors.Is(err, ErrOutOfBounds) {
+		err = ErrDatapointNotFound // as dobaos answers for descriptions
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -629,7 +702,7 @@ func (s *Server) getValues(c *baos.Client, payload any, stored bool) (any, error
 		// Version 1 leaves out the values that are not known.
 		for _, id := range missing {
 			if _, ok := s.stored[id]; !ok {
-				s.stored[id] = Value{ID: id, Valid: new(bool)}
+				s.stored[id] = Value{ID: id, Valid: s.invalid()}
 			}
 		}
 	}
@@ -764,9 +837,14 @@ func (s *Server) readValues(c *baos.Client, payload any) (any, error) {
 		return true, nil
 	}
 
-	out := make([]Value, len(ids))
+	type result struct {
+		ID      uint16 `json:"id"`
+		Success bool   `json:"success"`
+	}
+
+	out := make([]result, len(ids))
 	for i, id := range ids {
-		out[i] = Value{ID: id, Success: ptr(true)}
+		out[i] = result{ID: id, Success: true}
 	}
 
 	return out, nil

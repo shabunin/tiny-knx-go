@@ -266,7 +266,7 @@ func TestServer(t *testing.T) {
 	var list []Description
 	call(t, c, "get description", nil, &list)
 
-	if len(list) != 3 || list[1].Type != "dpt9" || list[1].Name != "temperature" || list[1].Size != 16 || !list[1].Write || list[1].Read {
+	if len(list) != 3 || list[1].Type != 9 || list[1].Priority != 3 || list[1].Name != "temperature" || list[1].Size != 16 || !list[1].Write || list[1].Read {
 		t.Fatalf("descriptions %+v", list)
 	}
 
@@ -368,6 +368,9 @@ func TestServer(t *testing.T) {
 		err     string
 	}{
 		{"get value", 9, "ERR_DATAPOINT_NOT_FOUND"},
+		{"get value", 0, "ERR_DATAPOINT_OUT_OF_BOUNDS"},
+		{"read value", []any{1, 1001}, "ERR_DATAPOINT_OUT_OF_BOUNDS"},
+		{"get description", 0, "ERR_DATAPOINT_NOT_FOUND"},
 		{"get value", "nothing", "ERR_DATAPOINT_NOT_FOUND"},
 		{"set value", map[string]any{"id": 1}, "ERR_WRONG_VALUE_PAYLOAD"},
 		{"set value", map[string]any{"id": 2, "value": "warm"}, "ERR_WRONG_VALUE_TYPE"},
@@ -391,5 +394,71 @@ func TestServerWithoutObjectServer(t *testing.T) {
 
 	if version != Version {
 		t.Errorf("version %q", version)
+	}
+}
+
+func TestServerListenNamesAndBinary(t *testing.T) {
+	bc, err := baos.NewClient(newObjectServer(), baos.Config{Version: baos.Version2})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hub := gateway.NewBAOSHub()
+	hub.Use(bc)
+
+	s, err := NewServer(hub, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.SetBare(true)
+
+	broadcasts := make(chan Response, 4)
+	s.Listen(func(r Response) { broadcasts <- r })
+	s.SetNames(map[string]uint16{"light": 1})
+
+	handle := func(method string, payload any) Response {
+		data, _ := json.Marshal(payload)
+		return s.Handle(Request{Method: method, Payload: data})
+	}
+
+	if r := handle("set value", map[string]any{"id": "light", "value": true}); r.Method != "success" {
+		t.Fatalf("set value: %+v", r)
+	}
+
+	select {
+	case r := <-broadcasts:
+		values, ok := r.Payload.([]Value)
+		if r.Method != "datapoint value" || !ok || len(values) != 1 || values[0].Name != "light" {
+			t.Errorf("broadcast %+v", r)
+		}
+	case <-time.After(time.Second):
+		t.Error("no broadcast")
+	}
+
+	// Bare: what dobaos sends, no more.
+	for _, tt := range []struct{ method, want string }{
+		{"get description", `{"id":3,"type":10,"priority":3,"communication":true,"read":false,"write":true,"read_on_init":false,"transmit":true,"update":false}`},
+		{"get value", `{"id":3,"value":{"day":0,"hour":0,"minutes":0,"seconds":0},"raw":"AAAA"}`},
+	} {
+		got, _ := json.Marshal(handle(tt.method, 3).Payload)
+		if string(got) != tt.want {
+			t.Errorf("%s: %s, want %s", tt.method, got, tt.want)
+		}
+	}
+
+	got, _ := json.Marshal(handle("read value", []int{1, 2}).Payload)
+	if string(got) != `[{"id":1,"success":true},{"id":2,"success":true}]` {
+		t.Errorf("read value: %s", got)
+	}
+
+	// GetServerItem 14 (the buffer size), as dobaos passes it on.
+	r := handle("binary request", "8AEADgAB")
+	if r.Method != "success" || r.Payload != "8IEADgABAA4CAPo=" {
+		t.Errorf("binary request: %+v", r)
+	}
+
+	if r := handle("binary request", 1); r.Payload != ErrPayloadType.Error() {
+		t.Errorf("binary request of a number: %+v", r)
 	}
 }

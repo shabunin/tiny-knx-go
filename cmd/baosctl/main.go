@@ -749,11 +749,24 @@ func printDescriptions(p json.RawMessage) error {
 			name = "---"
 		}
 
-		out(fmt.Sprintf("#%d <%s>, %s, %d bits, prio: %s, flags: [%s]", d.ID, name, d.Type, d.Size, d.Priority, flags))
+		typ := "unknown"
+		if d.Type != 0 {
+			typ = fmt.Sprintf("dpt%d", d.Type)
+		}
+
+		prio := strconv.Itoa(d.Priority)
+		if d.Priority >= 0 && d.Priority < len(priorities) {
+			prio = priorities[d.Priority]
+		}
+
+		out(fmt.Sprintf("#%d <%s>, %s, %d bits, prio: %s, flags: [%s]", d.ID, name, typ, d.Size, prio, flags))
 	}
 
 	return nil
 }
+
+// priorities are the names of the priorities that descriptions give as numbers.
+var priorities = [...]string{"system", "high", "alarm", "low"}
 
 var itemNames = map[uint16]string{
 	1: "hardware type", 2: "hardware version", 3: "firmware version", 4: "manufacturer",

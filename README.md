@@ -180,7 +180,7 @@ which requests take instead of IDs; the methods `set name`, `get name` and `remo
 
 | method | payload | |
 | :--- | :--- | :--- |
-| `get description` | `null`/`"*"`, ID, name or array | type (`dpt9`), size in bits, priority, flags, name |
+| `get description` | `null`/`"*"`, ID, name or array | type (the main DPT, e.g. `9`; `0` if unknown), size in bits, priority (`0` system … `3` low), flags, name |
 | `get value` | the same | values read from the module |
 | `get stored` | the same | values as last known, without asking the module |
 | `set value` | `{"id", "value"}` or `{"id", "raw"}`, or an array | set and send to the bus |
@@ -189,6 +189,7 @@ which requests take instead of IDs; the methods `set name`, `get name` and `remo
 | `get programming mode`, `set programming mode` | `true`/`false` | |
 | `get name`, `set name`, `remove name` | ID or name; `{"id", "name"}`; IDs or names | |
 | `get server items`, `version`, `reset` | | `reset` reloads the datapoints |
+| `binary request` | an ObjectServer request in base64 | the response in base64 |
 
 Errors are dobaos's codes, e.g. `{"id": 2, "method": "error", "payload": "ERR_DATAPOINT_NOT_FOUND"}`;
 in `baos_auto` mode, while a tunnel is open, `ERR_NO_OBJECT_SERVER`. Every client gets the
