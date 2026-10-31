@@ -215,7 +215,7 @@ func runLink(inputs, outputs specs, trace bool) {
 		}
 
 		if l.Spec.Has("device") && l.Module == nil {
-			log.Fatalf("%s: device works with ft12 only", inputs[i])
+			log.Fatalf("%s: device works with ft12 and usb only", inputs[i])
 		}
 	}
 

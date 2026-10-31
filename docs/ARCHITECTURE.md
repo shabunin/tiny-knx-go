@@ -39,6 +39,7 @@ Arduino, with the bus connection and the configuration source kept pluggable.
  link       Link interface                                done
    ft12       BAOS / kBerry over FT1.2 (cEMI LL mode)      done
    tpuart     NCN5120 / TP-UART2                           done (checked on an NCN5120)
+   usb        KNX USB interfaces (HID), cEMI or EMI2       done (Linux: usbfs; checked on a Zennio)
    knxip      KNXnet/IP routing, tunnelling client/server  done (uses net; TinyGo: the client)
    mock       in-memory bus for tests and knxvbus          done
  ─────────────────────────────────────────────────────────
@@ -191,6 +192,13 @@ object table is ignored.
   a Zennio HVAC interface moved and back, with its status following), a line scan and device
   information (transport connections) all work. A TP-UART2 has not been tried. By default every group telegram is
   acknowledged; set `tpuart.Config.AcceptGroup` to acknowledge only the device's group addresses.
+- KNX USB: on Linux `link/usb` claims the HID interface through usbfs ioctls (detaching usbhid
+  until Close), so it needs neither hidraw, which e.g. the Wiren Board kernel lacks, nor libusb.
+  Checked on a Zennio KNX-USB Interface (28c2:0002) on a Wiren Board 7: it supports cEMI only
+  (device feature 1 = 0x0004), does not answer feature 2 (descriptor type 0) and sometimes not
+  the first request after the interface was claimed, rejects reading PID_DEVICE_DESCRIPTOR, and
+  accepts PID_COMM_MODE. Group reads, writes (the Zennio HVAC setpoint again) and monitoring work,
+  alongside knxd on the NCN5120 of the same line.
 - `knxip.TunnelServer` follows the thelsing stack: tunnel connections (link layer only) and
   device management connections, whose M_PropRead requests are answered from the server
   description (serial number, address, tunnel addresses, name, MAC). Group frames go to every tunnel

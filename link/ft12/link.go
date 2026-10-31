@@ -57,7 +57,7 @@ func (cfg Config) withDefaults() Config {
 // to and from cEMI. Serial settings for BAOS modules are 19200 baud, 8 data bits, even parity,
 // 1 stop bit.
 type Link struct {
-	conn     *Conn
+	conn     Transport
 	config   Config
 	protocol atomic.Uint32 // Protocol, ProtocolAuto until detected
 
@@ -82,12 +82,38 @@ var (
 	_ link.AddressSetter = (*Link)(nil)
 )
 
+// A Transport carries EMI messages between the Link and a module. Conn carries them in FT1.2
+// frames over a serial port; package usb carries them in HID reports.
+type Transport interface {
+	// Reset resets the connection to the module.
+	Reset() error
+
+	// Send sends a message to the module.
+	Send(payload []byte) error
+
+	// Inbound returns the messages from the module. It is closed when the transport terminates.
+	Inbound() <-chan []byte
+
+	// Resets signals that the module restarted.
+	Resets() <-chan struct{}
+
+	Close() error
+}
+
 // Open resets the module behind port and switches it to data link layer mode.
 func Open(port io.ReadWriter, config Config) (*Link, error) {
 	config = config.withDefaults()
 
+	return OpenTransport(NewConn(port, config.Conn), config)
+}
+
+// OpenTransport resets the module behind a transport and switches it to data link layer mode. The
+// transport is closed with the Link. Config.Conn is not used.
+func OpenTransport(t Transport, config Config) (*Link, error) {
+	config = config.withDefaults()
+
 	l := &Link{
-		conn:    NewConn(port, config.Conn),
+		conn:    t,
 		config:  config,
 		cons:    make(chan cemi.Message, 1),
 		props:   make(chan cemi.Message, 1),

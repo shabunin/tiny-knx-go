@@ -12,6 +12,7 @@
 //	knxmon -port /dev/serial0 -address 1.1.250   # change the module's own address
 //	knxmon -port /dev/ttyUSB0 -tpuart            # TP-UART or NCN5120 instead of a BAOS module
 //	knxmon -port /dev/ttyKNX -tpuart -baud 38400 -parity none  # NCN5120 of a Wiren Board
+//	knxmon -usb auto                             # KNX USB interface (as root, or see link/usb)
 //	knxmon -tunnel 192.168.1.10                  # KNXnet/IP tunnelling
 //	knxmon -router -iface eth0 -address 1.1.254  # KNXnet/IP routing
 //	knxmon -search                               # find KNXnet/IP interfaces and routers
@@ -46,6 +47,7 @@ import (
 	"github.com/shabunin/tiny-knx-go/link/ft12"
 	"github.com/shabunin/tiny-knx-go/link/knxip"
 	"github.com/shabunin/tiny-knx-go/link/tpuart"
+	"github.com/shabunin/tiny-knx-go/link/usb"
 	"github.com/shabunin/tiny-knx-go/mgmt"
 	"github.com/shabunin/tiny-knx-go/secure"
 	"github.com/shabunin/tiny-knx-go/serial"
@@ -65,6 +67,7 @@ func main() {
 	useTPUART := flag.Bool("tpuart", false, "the serial port has a TP-UART or NCN5120")
 	chip := flag.String("chip", "ncn5120", "TP-UART chip: ncn5120 or tpuart2")
 	parity := flag.String("parity", "even", "parity of the TP-UART: even, or none for an NCN512x strapped for 8 bits")
+	usbName := flag.String("usb", "", "use a KNX USB interface: auto, VVVV:PPPP (vendor:product) or /dev/bus/usb/BBB/DDD")
 	tunnel := flag.String("tunnel", "", "connect to this KNXnet/IP server (host[:port])")
 	router := flag.Bool("router", false, "use KNXnet/IP routing (224.0.23.12)")
 	iface := flag.String("iface", "", "network interface for routing and search")
@@ -181,6 +184,24 @@ func main() {
 
 		l = t
 
+	case *usbName != "":
+		name := *usbName
+		if name == "auto" {
+			name = ""
+		}
+
+		dev, err := usb.OpenDevice(name)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		m, err := usb.Open(dev, ft12.DefaultConfig)
+		if err != nil {
+			log.Fatalf("Opening %v: %v", dev.DeviceInfo, err)
+		}
+
+		l = setupModule(m, dev.DeviceInfo.String(), ia)
+
 	default:
 		l = openBAOS(*port, *baud, ia)
 	}
@@ -286,6 +307,13 @@ func openBAOS(path string, baud int, ia cemi.IndividualAddr) *ft12.Link {
 	if err != nil {
 		log.Fatalf("Opening BAOS link on %s: %v", path, err)
 	}
+
+	return setupModule(l, path, ia)
+}
+
+// setupModule shows the module and, if ia is set, changes its address.
+func setupModule(l *ft12.Link, name string, ia cemi.IndividualAddr) *ft12.Link {
+	log.Printf("Module on %s", name)
 
 	if l.Protocol() == ft12.ProtocolEMI2 {
 		log.Printf("Module ready, EMI2")

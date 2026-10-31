@@ -18,6 +18,7 @@ import (
 	"github.com/shabunin/tiny-knx-go/link/knxip"
 	"github.com/shabunin/tiny-knx-go/link/mock"
 	"github.com/shabunin/tiny-knx-go/link/tpuart"
+	"github.com/shabunin/tiny-knx-go/link/usb"
 	"github.com/shabunin/tiny-knx-go/secure"
 	"github.com/shabunin/tiny-knx-go/serial"
 )
@@ -44,6 +45,9 @@ const LineMedia = `  ft12:PORT[?baud=19200&device]     BAOS module (cEMI, kBerry
   tpuart:PORT[?baud=19200&parity=even|none&chip=ncn5120|tpuart2&address=15.15.255]
                                     TP-UART or NCN5120 transceiver; an NCN512x
                                     may be strapped for 8 bits without parity
+  usb:[VVVV:PPPP|/dev/bus/usb/BBB/DDD][?device]
+                                    KNX USB interface (cEMI or EMI2), the first one found
+                                    by default; needs write access to its usbfs node
   tunnel:HOST[:PORT][?user=2&password=&auth=]
                                     tunnel to another KNXnet/IP interface, secure with password
   routing:IFACE[?address=0.0.0]     KNXnet/IP routing (multicast 224.0.23.12)`
@@ -68,6 +72,17 @@ func OpenLine(spec *Spec) (*Line, error) {
 		}
 
 		log.Printf("Real line through %s: %v module at %v", spec.Target, module.Protocol(), module.Address())
+		l.Uplink, l.Module = module, module
+
+	case "usb":
+		spec.Has("device") // asked for by the caller
+
+		module, err := OpenUSB(spec.Target)
+		if err != nil {
+			return nil, err
+		}
+
+		log.Printf("Real line through USB: %v module at %v", module.Protocol(), module.Address())
 		l.Uplink, l.Module = module, module
 
 	case "tpuart":
@@ -198,6 +213,29 @@ func OpenModule(name string, baud int) (*ft12.Link, error) {
 	if _, err := module.ReadAddress(); err != nil {
 		module.Close()
 		return nil, fmt.Errorf("reading the address of the module on %s: %v", name, err)
+	}
+
+	return module, nil
+}
+
+// OpenUSB opens a KNX USB interface, the first one found if name is empty, and reads its address.
+func OpenUSB(name string) (*ft12.Link, error) {
+	dev, err := usb.OpenDevice(name)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("USB interface %v", dev.DeviceInfo)
+
+	module, err := usb.Open(dev, ft12.DefaultConfig)
+	if err != nil {
+		dev.Close()
+		return nil, fmt.Errorf("opening %s: %v", dev.Path, err)
+	}
+
+	if _, err := module.ReadAddress(); err != nil {
+		module.Close()
+		return nil, fmt.Errorf("reading the address of %s: %v", dev.Path, err)
 	}
 
 	return module, nil

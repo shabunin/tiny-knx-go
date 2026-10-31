@@ -45,6 +45,7 @@ roadmap are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | `link/mock` | In-memory bus for tests | ✓ |
 | `link/ft12` | BAOS modules (kBerry) and older EMI2 interfaces over FT1.2 serial, in data link layer mode; the protocol is detected, module restarts are survived | ✓ |
 | `link/tpuart` | TP-UART2 and NCN5120/5121/5130 transceivers | ✓ |
+| `link/usb` | KNX USB interfaces (cEMI or EMI2 in HID reports); on Linux through usbfs, without hidraw or libusb | |
 | `link/knxip` | KNXnet/IP tunnelling client and server, routing and discovery over UDP and TCP, the ObjectServer over KNXnet/IP as client and server (uses `net`) | |
 | `baos` | BAOS mode: the ObjectServer protocol (versions 1 and 2) of Weinzierl modules, whose datapoints ETS configures | ✓ |
 | `serial` | Opens serial ports on Linux with the standard library only | |
@@ -103,6 +104,7 @@ GOOS=linux GOARCH=arm64 go build ./cmd/knxmon   # GOARCH=arm GOARM=6 for 32-bit 
 ./knxmon -router -iface eth0 -address 1.1.254   # KNXnet/IP routing (multicast 224.0.23.12)
 ./knxmon -port /dev/ttyUSB0 -tpuart             # TP-UART / NCN5120 (-chip tpuart2 for Siemens)
 ./knxmon -port /dev/ttyKNX -tpuart -baud 38400 -parity none  # NCN5120 strapped for 38400 8N1 (Wiren Board)
+./knxmon -usb auto                              # KNX USB interface (root, or a udev rule for its usbfs node)
 ./knxmon -search                                # find KNXnet/IP interfaces and routers
 ./knxmon -port /dev/serial0 -scan 1.1           # list the devices of line 1.1
 ./knxmon -port /dev/serial0 -props 1.1.3        # dump all interface objects and properties
@@ -146,6 +148,7 @@ streams. In link mode the inputs pass telegrams, are bridged to each other and s
 knxgw -i ft12:/dev/ttyAMA0 -o knxip:wlan0                   # kBerry as a KNXnet/IP interface
 knxgw -i ft12:/dev/ttyUSB0?device -o knxip:eth0 -o monitor  # an EMI2 module, hosted as a device
 knxgw -i 'tpuart:/dev/ttyUSB0?address=1.1.250' -o knxip:eth0 -o routing:eth0
+knxgw -i usb: -o knxip:eth0                                 # a KNX USB interface
 knxgw -i tunnel:192.168.1.112 -o 'knxip:wlan0?port=3672&name=via the Pi'
 knxgw -i routing:eth0 -o 'knxip:eth0?tunnels=1.1.250,1.1.251'  # tunnelling for a KNX IP router
 ```
