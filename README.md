@@ -139,6 +139,10 @@ tinygo flash -target=m5stamp-s3a -port /dev/ttyACM0 \
   -ldflags "-X main.ssid=SSID -X main.password=PASSWORD -X main.gateway=192.168.1.10" .
 ```
 
+With `-X main.knxPassword=...` (and optionally `main.knxUser=2`, `main.knxAuth=CODE`) it opens a
+KNX IP Secure tunnel, e.g. to `knxvbus -password ...`. Deriving the keys (PBKDF2) takes about 6 s
+per key at boot.
+
 ## A gateway between media
 
 `knxgw` connects inputs, which reach a real line, to outputs, which serve it, like ffmpeg does with

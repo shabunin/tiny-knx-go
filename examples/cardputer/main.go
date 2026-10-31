@@ -13,6 +13,9 @@
 //
 //	tinygo flash -target=m5stamp-s3a -port /dev/ttyACM0 \
 //	  -ldflags "-X main.ssid=SSID -X main.password=PASSWORD -X main.gateway=192.168.1.10" .
+//
+// A secure tunnel (KNX IP Secure) also takes -X main.knxPassword=..., and optionally
+// -X main.knxUser=2 and -X main.knxAuth=... (the device authentication code).
 package main
 
 import "time"
@@ -37,7 +40,8 @@ func main() {
 	var input []byte
 	con.input("")
 
-	tunnel := dialGateway(con, ip)
+	config := tunnelConfig(con)
+	tunnel := dialGateway(con, ip, config)
 	con.print(help, grey)
 
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -47,7 +51,7 @@ func main() {
 		case ind, ok := <-tunnel.Inbound():
 			if !ok {
 				con.print("tunnel closed", red)
-				tunnel = dialGateway(con, ip)
+				tunnel = dialGateway(con, ip, config)
 				break
 			}
 

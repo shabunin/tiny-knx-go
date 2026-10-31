@@ -15,15 +15,49 @@ import (
 
 	"github.com/shabunin/tiny-knx-go/cemi"
 	"github.com/shabunin/tiny-knx-go/dpt"
+	"github.com/shabunin/tiny-knx-go/knxnet"
 	"github.com/shabunin/tiny-knx-go/link/knxip"
+	"github.com/shabunin/tiny-knx-go/secure"
 )
 
 // Set at build time: -ldflags "-X main.ssid=... -X main.password=... -X main.gateway=host[:port]".
+// With -X main.knxPassword=... the tunnel is opened in a KNX IP Secure session as main.knxUser
+// (2 by default), checking the interface's device authentication code if main.knxAuth is set.
 var (
 	ssid     string
 	password string
 	gateway  string
+
+	knxUser     = "2"
+	knxPassword string
+	knxAuth     string
 )
+
+// tunnelConfig derives the keys of a secure tunnel: PBKDF2 with 65536 rounds takes a while.
+func tunnelConfig(con *console) knxip.TunnelConfig {
+	config := knxip.DefaultTunnelConfig
+	if knxPassword == "" {
+		return config
+	}
+
+	user, err := strconv.ParseUint(knxUser, 10, 8)
+	if err != nil || user < 2 {
+		con.print("bad main.knxUser "+knxUser+", using 2", red)
+		user = 2
+	}
+
+	con.status("knx: deriving the secure keys...", yellow)
+	start := time.Now()
+
+	config.Tunnel.Secure = &knxnet.TunnelSecure{User: uint8(user), Password: secure.UserPasswordKey(knxPassword)}
+	if knxAuth != "" {
+		config.Tunnel.Secure.DeviceAuth = secure.DeviceAuthKey(knxAuth)
+	}
+
+	con.print(fmt.Sprintf("secure: user %d, keys in %v", user, time.Since(start).Round(time.Millisecond)), green)
+
+	return config
+}
 
 var wifi espnet.Esplink
 
@@ -48,14 +82,19 @@ func connectWiFi(con *console) string {
 }
 
 // dialGateway opens a tunnel, trying again until it succeeds.
-func dialGateway(con *console, ip string) *knxip.Tunnel {
+func dialGateway(con *console, ip string, config knxip.TunnelConfig) *knxip.Tunnel {
+	kind := "tunnel"
+	if config.Tunnel.Secure != nil {
+		kind = "secure tunnel"
+	}
+
 	for {
 		con.status(ip+"  knx: "+gateway+"...", yellow)
 
-		t, err := knxip.DialTunnel(gateway, knxip.DefaultTunnelConfig)
+		t, err := knxip.DialTunnel(gateway, config)
 		if err == nil {
 			con.status(ip+"  knx: "+t.Address().String()+" @ "+gateway, green)
-			con.print("tunnel open, address "+t.Address().String(), green)
+			con.print(kind+" open, address "+t.Address().String(), green)
 
 			return t
 		}

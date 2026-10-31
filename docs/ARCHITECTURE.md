@@ -162,7 +162,9 @@ object table is ignored.
 - Under TinyGo, `link/knxip` has only the tunnelling and ObjectServer clients: TinyGo's `net` has
   no multicast. Its UDP sockets are connected (netdev), so the client sends everything to the
   control endpoint and takes every packet as the server's; servers that want data at another
-  endpoint don't work. Checked on a Cardputer (ESP32-S3, espradio) with a knxvbus tunnel.
+  endpoint don't work. Checked on a Cardputer (ESP32-S3, espradio) with a knxvbus tunnel, also
+  in a KNX IP Secure session with device authentication (X25519 and the hardware RNG of
+  crypto/rand work; PBKDF2 of a password takes about 6 s there).
 - Frames we originate use control field 0xBC (low priority), the value ETS uses
   (`cemi.Control1Request`).
 - A BAOS module occupies one individual address and only acknowledges and forwards point-to-point
