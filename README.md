@@ -140,8 +140,13 @@ tinygo flash -target=m5stamp-s3a -port /dev/ttyACM0 \
 ```
 
 With `-X main.knxPassword=...` (and optionally `main.knxUser=2`, `main.knxAuth=CODE`) it opens a
-KNX IP Secure tunnel, e.g. to `knxvbus -password ...`. Deriving the keys (PBKDF2) takes about 6 s
-per key at boot.
+KNX IP Secure tunnel, e.g. to `knxvbus -password ...`.
+
+The settings are saved in flash, with the keys derived from the KNX passwords instead of the
+passwords (PBKDF2 takes about 6 s per key there), so they are computed once. A build without
+`-ldflags` asks for them; they can be changed on the keyboard at any time: `ssid NAME`,
+`wifipass PW`, `gw HOST[:PORT]`, `user N`, `knxpass PW|-`, `auth CODE|-`, `show`, `save`, `reboot`.
+Every command can also be typed on its USB serial console (115200 baud).
 
 ## A gateway between media
 

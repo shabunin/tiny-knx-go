@@ -17,12 +17,13 @@ import (
 	"github.com/shabunin/tiny-knx-go/dpt"
 	"github.com/shabunin/tiny-knx-go/knxnet"
 	"github.com/shabunin/tiny-knx-go/link/knxip"
-	"github.com/shabunin/tiny-knx-go/secure"
 )
 
-// Set at build time: -ldflags "-X main.ssid=... -X main.password=... -X main.gateway=host[:port]".
-// With -X main.knxPassword=... the tunnel is opened in a KNX IP Secure session as main.knxUser
-// (2 by default), checking the interface's device authentication code if main.knxAuth is set.
+// Optional settings at build time: -ldflags "-X main.ssid=... -X main.password=... -X
+// main.gateway=host[:port]". With -X main.knxPassword=... the tunnel is opened in a KNX IP Secure
+// session as main.knxUser (2 by default), checking the interface's device authentication code if
+// main.knxAuth is set. They are saved to flash (see startSettings) and can be changed on the
+// keyboard.
 var (
 	ssid     string
 	password string
@@ -33,47 +34,26 @@ var (
 	knxAuth     string
 )
 
-// tunnelConfig derives the keys of a secure tunnel: PBKDF2 with 65536 rounds takes a while.
-func tunnelConfig(con *console) knxip.TunnelConfig {
-	config := knxip.DefaultTunnelConfig
-	if knxPassword == "" {
-		return config
-	}
-
-	user, err := strconv.ParseUint(knxUser, 10, 8)
-	if err != nil || user < 2 {
-		con.print("bad main.knxUser "+knxUser+", using 2", red)
-		user = 2
-	}
-
-	con.status("knx: deriving the secure keys...", yellow)
-	start := time.Now()
-
-	config.Tunnel.Secure = &knxnet.TunnelSecure{User: uint8(user), Password: secure.UserPasswordKey(knxPassword)}
-	if knxAuth != "" {
-		config.Tunnel.Secure.DeviceAuth = secure.DeviceAuthKey(knxAuth)
-	}
-
-	con.print(fmt.Sprintf("secure: user %d, keys in %v", user, time.Since(start).Round(time.Millisecond)), green)
-
-	return config
-}
-
 var wifi espnet.Esplink
 
-func connectWiFi(con *console) string {
+func connectWiFi(con *console, s *settings) string {
 	netdev.UseNetdev(&wifi)
 
-	for {
-		con.status("wifi: connecting to "+ssid, yellow)
+	for try := 0; ; try++ {
+		con.status("wifi: connecting to "+s.ssid, yellow)
 
-		err := wifi.NetConnect(&nl.ConnectParams{Ssid: ssid, Passphrase: password})
+		err := wifi.NetConnect(&nl.ConnectParams{Ssid: s.ssid, Passphrase: s.wifiPassword})
 		if err == nil {
 			break
 		}
 
 		con.print("wifi: "+err.Error(), red)
-		time.Sleep(3 * time.Second)
+
+		// The first attempt after a restart often ends in a handshake timeout (of the Wi-Fi
+		// blob, after 12 s) and the next one succeeds at once.
+		if try > 0 {
+			time.Sleep(3 * time.Second)
+		}
 	}
 
 	addr, _ := wifi.Addr()
@@ -81,8 +61,22 @@ func connectWiFi(con *console) string {
 	return addr.String()
 }
 
+// tunnelConfig opens a secure tunnel if the settings have a password key.
+func tunnelConfig(s *settings) knxip.TunnelConfig {
+	config := knxip.DefaultTunnelConfig
+
+	if s.passwordKey != nil {
+		config.Tunnel.Secure = &knxnet.TunnelSecure{User: s.user, Password: *s.passwordKey}
+		if s.authKey != nil {
+			config.Tunnel.Secure.DeviceAuth = *s.authKey
+		}
+	}
+
+	return config
+}
+
 // dialGateway opens a tunnel, trying again until it succeeds.
-func dialGateway(con *console, ip string, config knxip.TunnelConfig) *knxip.Tunnel {
+func dialGateway(con *console, ip, gateway string, config knxip.TunnelConfig) *knxip.Tunnel {
 	kind := "tunnel"
 	if config.Tunnel.Secure != nil {
 		kind = "secure tunnel"
@@ -159,7 +153,7 @@ func value(app *cemi.AppData) string {
 	}
 }
 
-const help = "w GA on|off|N|N.N|N%|xHEX, r GA, clear"
+const help = "w GA on|off|N|N.N|N%|xHEX, r GA, clear, set"
 
 // execute runs a command typed on the keyboard.
 func execute(con *console, t *knxip.Tunnel, text string) {
