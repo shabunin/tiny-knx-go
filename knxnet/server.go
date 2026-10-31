@@ -428,7 +428,9 @@ func (s *Server) handle(now time.Time, from HPAI, service Service) {
 
 	switch r := service.(type) {
 	case *SearchRequest:
-		s.reply(route(r.Discovery), &SearchResponse{Control: s.config.Control, Device: s.config.Device, Extended: r.Extended})
+		if device, ok := s.searchResponse(r); ok {
+			s.reply(route(r.Discovery), &SearchResponse{Control: s.config.Control, Device: device, Extended: r.Extended})
+		}
 
 	case *DescriptionRequest:
 		s.reply(route(r.Control), &DescriptionResponse{Device: s.config.Device})
@@ -538,16 +540,68 @@ func (s *Server) connect(now time.Time, control, data HPAI, r *ConnectRequest) {
 	s.emit(ServerEvent{Kind: ServerOpened, Channel: c.channel, Type: c.kind, Address: c.address, Session: c.sessionID(), User: c.user()})
 }
 
-func (s *Server) freeTunnel() (cemi.IndividualAddr, bool) {
-next:
-	for _, addr := range s.config.Tunnels {
-		for _, c := range s.conns {
-			if c.kind == TunnelConnection && c.address == addr {
-				continue next
+// searchResponse describes the server for a search request, with the DIBs that it asks for, or
+// returns false if its parameters select other servers.
+func (s *Server) searchResponse(r *SearchRequest) (DeviceInfo, bool) {
+	d := s.config.Device
+
+	if r.Unsupported ||
+		r.ProgrammingMode && d.Status&1 == 0 ||
+		r.MAC != nil && *r.MAC != d.MAC ||
+		r.Service.ID != 0 && !d.supportsVersion(r.Service) {
+		return d, false
+	}
+
+	for _, dib := range r.DIBs {
+		switch dib {
+		case DIBTunnellingInfo:
+			if len(s.config.Tunnels) > 0 {
+				d.Tunnelling = s.tunnellingInfo()
 			}
+
+		case DIBExtendedInfo:
+			d.Extended = &ExtendedDeviceInfo{MaxAPDU: MaxAPDU, Descriptor: RouterMask}
+		}
+	}
+
+	return d, true
+}
+
+// tunnellingInfo tells which tunnels are in use.
+func (s *Server) tunnellingInfo() *TunnellingInfo {
+	t := &TunnellingInfo{MaxAPDU: MaxAPDU}
+
+	for _, addr := range s.config.Tunnels {
+		status := SlotUsable
+		if s.secure == nil {
+			status |= SlotAuthorized
 		}
 
-		return addr, true
+		if !s.tunnelInUse(addr) {
+			status |= SlotFree
+		}
+
+		t.Slots = append(t.Slots, TunnelSlot{Address: addr, Status: status})
+	}
+
+	return t
+}
+
+func (s *Server) tunnelInUse(addr cemi.IndividualAddr) bool {
+	for _, c := range s.conns {
+		if c.kind == TunnelConnection && c.address == addr {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (s *Server) freeTunnel() (cemi.IndividualAddr, bool) {
+	for _, addr := range s.config.Tunnels {
+		if !s.tunnelInUse(addr) {
+			return addr, true
+		}
 	}
 
 	return 0, false

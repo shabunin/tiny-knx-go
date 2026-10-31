@@ -676,10 +676,6 @@ const (
 
 	errVoidProperty = 0x07
 	errReadOnly     = 0x05
-
-	// maskVersion is the device descriptor of a KNXnet/IP router with tunnelling, like the
-	// 0x091A device of the thelsing stack.
-	maskVersion = 0x091A
 )
 
 // management answers a message from a device management connection.
@@ -742,9 +738,9 @@ func (s *TunnelServer) property(objectType uint16, id uint8) ([]byte, int) {
 		case pidManufacturerID:
 			return info.SerialNumber[:2], 2
 		case pidMaxAPDULength:
-			return []byte{0, 15}, 2
+			return []byte{0, knxnet.MaxAPDU}, 2
 		case pidDescriptor:
-			return []byte{maskVersion >> 8, maskVersion & 0xff}, 2
+			return []byte{knxnet.RouterMask >> 8, knxnet.RouterMask & 0xff}, 2
 		}
 
 	case cemi.ObjectTypeCEMIServer:

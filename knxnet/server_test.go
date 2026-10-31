@@ -1,6 +1,8 @@
 package knxnet
 
 import (
+	"encoding/hex"
+	"slices"
 	"testing"
 	"time"
 
@@ -295,6 +297,99 @@ func TestServerTimeouts(t *testing.T) {
 
 	if len(p.server.Connections()) != 0 {
 		t.Error("Silent connection was not closed")
+	}
+}
+
+// ETS 6 sends extended searches that ask for the tunnelling information, and offers only the
+// interfaces that tell it about a free tunnel.
+func TestServerExtendedSearch(t *testing.T) {
+	mac := [6]byte{0x98, 0x48, 0x27, 0xa5, 0x8d, 0xb5}
+	tunnels := []cemi.IndividualAddr{cemi.NewIndividualAddr3(1, 4, 1), cemi.NewIndividualAddr3(1, 4, 2)}
+	s := NewServer(ServerConfig{Control: serverEndpoint, TCP: true, Tunnels: tunnels, Device: DeviceInfo{MAC: mac}})
+
+	// Captured from ETS 6: request DIBs 01, 02, 08, 06 and 07.
+	ets, _ := hex.DecodeString("0610020b00160801c0a80212fb0b0804010208060700")
+
+	search := func(packet []byte) *SearchResponse {
+		t.Helper()
+		s.HandlePacket(t0, clientEndpoint, packet)
+
+		event, ok := s.NextEvent()
+		if !ok {
+			return nil
+		}
+
+		r, err := Decode(event.Packet)
+		if err != nil || !r.(*SearchResponse).Extended {
+			t.Fatalf("Search response %+v, %v", r, err)
+		}
+
+		return r.(*SearchResponse)
+	}
+
+	request, err := Decode(ets)
+	if r, _ := request.(*SearchRequest); err != nil || !slices.Equal(r.DIBs, []uint8{1, 2, 8, 6, 7}) {
+		t.Fatalf("ETS request %+v, %v", request, err)
+	}
+
+	r := search(ets)
+	if r == nil || r.Device.Tunnelling == nil || r.Device.Extended == nil {
+		t.Fatalf("Response %+v", r)
+	}
+
+	want := []TunnelSlot{{tunnels[0], 0x07}, {tunnels[1], 0x07}}
+	if ti := r.Device.Tunnelling; ti.MaxAPDU != 15 || !slices.Equal(ti.Slots, want) {
+		t.Errorf("Tunnelling info %+v", ti)
+	}
+
+	if e := *r.Device.Extended; e != (ExtendedDeviceInfo{MaxAPDU: 15, Descriptor: 0x091A}) {
+		t.Errorf("Extended device info %+v", e)
+	}
+
+	// An open tunnel is no longer free.
+	s.HandlePacket(t0, clientEndpoint, Encode(&ConnectRequest{Type: TunnelConnection, Layer: TunnelLinkLayer}))
+	for _, ok := s.NextEvent(); ok; _, ok = s.NextEvent() {
+	}
+
+	if slots := search(ets).Device.Tunnelling.Slots; slots[0].Status != 0x06 || slots[1].Status != 0x07 {
+		t.Errorf("Slots with a connection %+v", slots)
+	}
+
+	// Parameters select servers: in programming mode, by MAC address, by service family.
+	other := [6]byte{1, 2, 3, 4, 5, 6}
+	for _, c := range []struct {
+		request SearchRequest
+		answer  bool
+	}{
+		{SearchRequest{ProgrammingMode: true}, false},
+		{SearchRequest{MAC: &mac}, true},
+		{SearchRequest{MAC: &other}, false},
+		{SearchRequest{Service: ServiceFamily{FamilyCore, 2}}, true},
+		{SearchRequest{Service: ServiceFamily{FamilyTunnelling, 2}}, false},
+		{SearchRequest{Service: ServiceFamily{FamilyRouting, 1}}, false},
+	} {
+		c.request.Extended = true
+		packet := Encode(&c.request)
+
+		if decoded, _ := Decode(packet); !slices.Equal(Encode(decoded), packet) {
+			t.Errorf("Decoded %+v, want %+v", decoded, &c.request)
+		}
+
+		if got := search(packet) != nil; got != c.answer {
+			t.Errorf("Search %+v answered: %v", c.request, got)
+		}
+	}
+
+	// An unknown mandatory parameter: no answer; an optional one is ignored.
+	withParameter := func(kind byte) []byte {
+		p := append(slices.Clone(ets), 2, kind)
+		p[5] = byte(len(p))
+
+		return p
+	}
+
+	if search(withParameter(0x80|0x7F)) != nil || search(withParameter(0x7F)) == nil {
+		t.Error("Unknown parameters")
 	}
 }
 

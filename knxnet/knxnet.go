@@ -126,8 +126,9 @@ func Decode(data []byte) (Service, error) {
 	case SearchResponseID:
 		s = &SearchResponse{Control: r.hpai(), Device: r.dibs()}
 	case SearchRequestExtID:
-		s = &SearchRequest{Discovery: r.hpai(), Extended: true}
-		r.data = nil // search request parameters are not evaluated
+		request := &SearchRequest{Discovery: r.hpai(), Extended: true}
+		r.searchParameters(request)
+		s = request
 	case SearchResponseExtID:
 		s = &SearchResponse{Control: r.hpai(), Device: r.dibs(), Extended: true}
 	case DescriptionRequestID:
@@ -273,8 +274,25 @@ type SearchRequest struct {
 	Discovery HPAI // where to send the responses
 
 	// Extended marks a SEARCH_REQUEST_EXTENDED (KNXnet/IP 2), answered with an extended
-	// response. Its search parameters are not supported.
+	// response. The fields below are its search request parameters.
 	Extended bool
+
+	// ProgrammingMode selects the servers in programming mode.
+	ProgrammingMode bool
+
+	// MAC, if not nil, selects the server with this MAC address.
+	MAC *[6]byte
+
+	// Service, if its ID is not zero, selects the servers that support the service family in
+	// at least this version.
+	Service ServiceFamily
+
+	// DIBs are the description information blocks to put into the response, besides the
+	// device information and the service families (e.g. DIBTunnellingInfo). ETS asks for them.
+	DIBs []uint8
+
+	// Unsupported is set when a mandatory parameter was not understood: servers do not answer.
+	Unsupported bool
 }
 
 func (s *SearchRequest) ServiceID() ServiceID {
@@ -285,7 +303,82 @@ func (s *SearchRequest) ServiceID() ServiceID {
 	return SearchRequestID
 }
 
-func (s *SearchRequest) appendBody(b []byte) []byte { return appendHPAI(b, s.Discovery) }
+// Types of search request parameters; the mandatory bit tells servers that do not know a
+// parameter not to answer.
+const (
+	srpProgrammingMode = 0x01
+	srpMAC             = 0x02
+	srpService         = 0x03
+	srpDIBs            = 0x04
+	srpMandatory       = 0x80
+)
+
+func (s *SearchRequest) appendBody(b []byte) []byte {
+	b = appendHPAI(b, s.Discovery)
+	if !s.Extended {
+		return b
+	}
+
+	if s.ProgrammingMode {
+		b = append(b, 2, srpMandatory|srpProgrammingMode)
+	}
+
+	if s.MAC != nil {
+		b = append(append(b, 8, srpMandatory|srpMAC), s.MAC[:]...)
+	}
+
+	if s.Service.ID != 0 {
+		b = append(b, 4, srpMandatory|srpService, s.Service.ID, s.Service.Version)
+	}
+
+	if len(s.DIBs) > 0 {
+		n := 2 + len(s.DIBs) + len(s.DIBs)%2 // padded to an even length
+		b = append(append(b, byte(n), srpDIBs), s.DIBs...)
+		if len(s.DIBs)%2 == 1 {
+			b = append(b, 0)
+		}
+	}
+
+	return b
+}
+
+// searchParameters decodes the parameters of an extended search request.
+func (r *reader) searchParameters(s *SearchRequest) {
+	for r.err == nil && len(r.data) >= 2 {
+		length := int(r.data[0])
+		if length < 2 {
+			r.fail(ErrStructure)
+			break
+		}
+
+		block := r.take(length)
+		if block == nil {
+			break
+		}
+
+		switch kind := block[1] &^ srpMandatory; {
+		case kind == srpProgrammingMode:
+			s.ProgrammingMode = true
+
+		case kind == srpMAC && length == 8:
+			s.MAC = new([6]byte)
+			copy(s.MAC[:], block[2:])
+
+		case kind == srpService && length == 4:
+			s.Service = ServiceFamily{ID: block[2], Version: block[3]}
+
+		case kind == srpDIBs:
+			for _, dib := range block[2:] {
+				if dib != 0 {
+					s.DIBs = append(s.DIBs, dib)
+				}
+			}
+
+		case block[1]&srpMandatory != 0:
+			s.Unsupported = true
+		}
+	}
+}
 
 // SearchResponse describes a KNXnet/IP server.
 type SearchResponse struct {
@@ -344,7 +437,45 @@ type DeviceInfo struct {
 	// ManufacturerData is the content of the manufacturer data DIB: the manufacturer ID and its
 	// data, e.g. ObjectServerData. The DIB is left out if it is empty.
 	ManufacturerData []byte
+
+	// Tunnelling and Extended are sent when an extended search asks for them (DIBs 07 and 08 of
+	// KNXnet/IP 2); they are left out if nil. ETS reads the free tunnels from Tunnelling.
+	Tunnelling *TunnellingInfo
+	Extended   *ExtendedDeviceInfo
 }
+
+// TunnellingInfo is the tunnelling information DIB: the tunnels of a server and their state.
+type TunnellingInfo struct {
+	MaxAPDU uint16
+	Slots   []TunnelSlot
+}
+
+// A TunnelSlot is a tunnel of a server, with the Slot flags of its state.
+type TunnelSlot struct {
+	Address cemi.IndividualAddr
+	Status  uint16
+}
+
+// Flags of TunnelSlot.Status.
+const (
+	SlotFree       uint16 = 0x01 // no connection uses the tunnel
+	SlotAuthorized uint16 = 0x02 // the tunnel may be used without a secure session
+	SlotUsable     uint16 = 0x04
+)
+
+// ExtendedDeviceInfo is the extended device information DIB.
+type ExtendedDeviceInfo struct {
+	MediumStatus uint8 // bit 0: communication impossible
+	MaxAPDU      uint16
+	Descriptor   uint16 // device descriptor type 0, e.g. RouterMask
+}
+
+// RouterMask is the device descriptor (mask version) of a KNXnet/IP router with tunnelling, like the
+// 0x091A device of the thelsing stack, which the tunnelling servers of this module report.
+const RouterMask = 0x091A
+
+// MaxAPDU is the longest APDU that the tunnels of this module pass: that of standard frames.
+const MaxAPDU = 15
 
 // A ServiceFamily is a group of services supported by a server, with its version.
 type ServiceFamily struct {
@@ -389,6 +520,17 @@ func (d *DeviceInfo) ObjectServer() (uint8, bool) {
 	return 0, false
 }
 
+// supportsVersion reports whether the server supports a service family in at least its version.
+func (d *DeviceInfo) supportsVersion(family ServiceFamily) bool {
+	for _, f := range d.Families {
+		if f.ID == family.ID && f.Version >= family.Version {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Supports reports whether the server supports a service family.
 func (d *DeviceInfo) Supports(family uint8) bool {
 	for _, f := range d.Families {
@@ -400,15 +542,18 @@ func (d *DeviceInfo) Supports(family uint8) bool {
 	return false
 }
 
+// Types of description information blocks, which an extended search can ask for.
 const (
-	dibDeviceInfo = 0x01
-	dibFamilies   = 0x02
-	dibSecured    = 0x06
-	dibMfrData    = 0xFE
+	DIBDeviceInfo     = 0x01
+	DIBFamilies       = 0x02
+	DIBSecured        = 0x06
+	DIBTunnellingInfo = 0x07
+	DIBExtendedInfo   = 0x08
+	DIBManufacturer   = 0xFE
 )
 
 func (d *DeviceInfo) appendDIBs(b []byte) []byte {
-	b = append(b, 54, dibDeviceInfo, d.Medium, d.Status)
+	b = append(b, 54, DIBDeviceInfo, d.Medium, d.Status)
 	b = binary.BigEndian.AppendUint16(b, uint16(d.Address))
 	b = binary.BigEndian.AppendUint16(b, d.ProjectID)
 	b = append(b, d.SerialNumber[:]...)
@@ -419,13 +564,28 @@ func (d *DeviceInfo) appendDIBs(b []byte) []byte {
 	copy(name[:], d.Name)
 	b = append(b, name[:]...)
 
-	b = appendFamilies(b, dibFamilies, d.Families)
+	b = appendFamilies(b, DIBFamilies, d.Families)
 	if len(d.Secured) > 0 {
-		b = appendFamilies(b, dibSecured, d.Secured)
+		b = appendFamilies(b, DIBSecured, d.Secured)
+	}
+
+	if t := d.Tunnelling; t != nil {
+		b = append(b, byte(4+4*len(t.Slots)), DIBTunnellingInfo)
+		b = binary.BigEndian.AppendUint16(b, t.MaxAPDU)
+		for _, slot := range t.Slots {
+			b = binary.BigEndian.AppendUint16(b, uint16(slot.Address))
+			b = binary.BigEndian.AppendUint16(b, slot.Status)
+		}
+	}
+
+	if e := d.Extended; e != nil {
+		b = append(b, 8, DIBExtendedInfo, e.MediumStatus, 0)
+		b = binary.BigEndian.AppendUint16(b, e.MaxAPDU)
+		b = binary.BigEndian.AppendUint16(b, e.Descriptor)
 	}
 
 	if len(d.ManufacturerData) > 0 {
-		b = append(append(b, byte(2+len(d.ManufacturerData)), dibMfrData), d.ManufacturerData...)
+		b = append(append(b, byte(2+len(d.ManufacturerData)), DIBManufacturer), d.ManufacturerData...)
 	}
 
 	return b
@@ -859,7 +1019,7 @@ func (r *reader) dibs() DeviceInfo {
 		}
 
 		switch block[1] {
-		case dibDeviceInfo:
+		case DIBDeviceInfo:
 			if length < 54 {
 				r.fail(ErrStructure)
 				break
@@ -874,13 +1034,41 @@ func (r *reader) dibs() DeviceInfo {
 			copy(d.MAC[:], block[18:24])
 			d.Name = trimName(block[24:54])
 
-		case dibFamilies:
+		case DIBFamilies:
 			d.Families = families(block)
 
-		case dibSecured:
+		case DIBSecured:
 			d.Secured = families(block)
 
-		case dibMfrData:
+		case DIBTunnellingInfo:
+			if length < 4 {
+				r.fail(ErrStructure)
+				break
+			}
+
+			t := &TunnellingInfo{MaxAPDU: binary.BigEndian.Uint16(block[2:])}
+			for i := 4; i+4 <= length; i += 4 {
+				t.Slots = append(t.Slots, TunnelSlot{
+					Address: cemi.IndividualAddr(binary.BigEndian.Uint16(block[i:])),
+					Status:  binary.BigEndian.Uint16(block[i+2:]),
+				})
+			}
+
+			d.Tunnelling = t
+
+		case DIBExtendedInfo:
+			if length < 8 {
+				r.fail(ErrStructure)
+				break
+			}
+
+			d.Extended = &ExtendedDeviceInfo{
+				MediumStatus: block[2],
+				MaxAPDU:      binary.BigEndian.Uint16(block[4:]),
+				Descriptor:   binary.BigEndian.Uint16(block[6:]),
+			}
+
+		case DIBManufacturer:
 			d.ManufacturerData = append([]byte(nil), block[2:]...)
 		}
 	}
